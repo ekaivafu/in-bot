@@ -70,17 +70,31 @@ if USE_POSTGRES:
 def get_db_cursor():
     """
     Context manager yielding a database cursor (Postgres or SQLite).
-    Handles commit, rollback, and returning connection to pool.
+    Handles commit, rollback, connection liveness, and SSL resets from Neon cold-starts.
     """
     global _pg_pool, USE_POSTGRES
-    if USE_POSTGRES and _pg_pool:
+    if USE_POSTGRES:
+        import psycopg2
+
+        def _fresh_conn():
+            return psycopg2.connect(
+                DATABASE_URL,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+
         conn = None
+        # Try to get a pooled connection, recreate pool on failure
         with _pg_lock:
             try:
-                conn = _pg_pool.getconn()
+                if _pg_pool:
+                    conn = _pg_pool.getconn()
             except Exception:
+                pass
+            if conn is None:
                 try:
-                    import psycopg2
                     from psycopg2.pool import ThreadedConnectionPool
                     _pg_pool = ThreadedConnectionPool(
                         1, 10,
@@ -92,29 +106,19 @@ def get_db_cursor():
                     )
                     conn = _pg_pool.getconn()
                 except Exception as exc:
-                    logger.error("Failed to acquire PostgreSQL connection: %s", exc)
-                    raise
+                    logger.error("Failed to acquire PostgreSQL connection from pool: %s", exc)
+                    # Last resort: direct connection
+                    conn = _fresh_conn()
 
-        # Check connection liveness
+        # Ping to verify the connection is alive (catches SSL resets from Neon sleep)
         try:
-            import psycopg2
-            if conn.closed != 0:
-                conn = psycopg2.connect(
-                    DATABASE_URL,
-                    keepalives=1,
-                    keepalives_idle=30,
-                    keepalives_interval=10,
-                    keepalives_count=5,
-                )
+            conn.cursor().execute("SELECT 1")
         except Exception:
-            import psycopg2
-            conn = psycopg2.connect(
-                DATABASE_URL,
-                keepalives=1,
-                keepalives_idle=30,
-                keepalives_interval=10,
-                keepalives_count=5,
-            )
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = _fresh_conn()
 
         try:
             with conn.cursor() as cur:
@@ -129,7 +133,10 @@ def get_db_cursor():
         finally:
             with _pg_lock:
                 try:
-                    _pg_pool.putconn(conn)
+                    if _pg_pool:
+                        _pg_pool.putconn(conn)
+                    else:
+                        conn.close()
                 except Exception:
                     try:
                         conn.close()
@@ -218,56 +225,68 @@ def _migrate_from_sqlite() -> None:
 # ── Init ───────────────────────────────────────────────────────────────────────
 def init_db() -> None:
     if USE_POSTGRES:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id    BIGINT PRIMARY KEY,
-                    username   TEXT DEFAULT '',
-                    first_name TEXT DEFAULT '',
-                    joined_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    last_seen  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-
-                CREATE TABLE IF NOT EXISTS downloads (
-                    id        SERIAL PRIMARY KEY,
-                    user_id   BIGINT NOT NULL,
-                    url       TEXT DEFAULT '',
-                    success   INTEGER NOT NULL DEFAULT 0,
-                    ts        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-
-                CREATE TABLE IF NOT EXISTS settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS channels (
-                    id          SERIAL PRIMARY KEY,
-                    chat_id     TEXT UNIQUE NOT NULL,
-                    title       TEXT NOT NULL,
-                    invite_link TEXT DEFAULT '',
-                    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            """)
-
-            # Check if migration needed
-            cur.execute("SELECT value FROM settings WHERE key='sqlite_migrated'")
-            migrated = cur.fetchone()
-            if not migrated and DB_PATH.exists():
-                _migrate_from_sqlite()
-
-            # Restore cookies.txt from database if missing from disk (e.g. Render restart/redeploy)
+        # Retry up to 3 times — Neon wakes from sleep and the first SSL connection
+        # sometimes drops before init queries can execute.
+        last_exc = None
+        for attempt in range(1, 4):
             try:
-                cur.execute("SELECT value FROM settings WHERE key='active_cookies'")
-                crow = cur.fetchone()
-                if crow and crow[0] and not Path("cookies.txt").exists():
-                    Path("cookies.txt").write_text(crow[0], encoding="utf-8")
-                    logger.info("Restored cookies.txt from database")
-            except Exception as e:
-                logger.warning("Failed to restore cookies: %s", e)
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            user_id    BIGINT PRIMARY KEY,
+                            username   TEXT DEFAULT '',
+                            first_name TEXT DEFAULT '',
+                            joined_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            last_seen  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
 
-            _load_caches(cur)
-        logger.info("Database initialized (Neon PostgreSQL mode with in-memory caching)")
+                        CREATE TABLE IF NOT EXISTS downloads (
+                            id        SERIAL PRIMARY KEY,
+                            user_id   BIGINT NOT NULL,
+                            url       TEXT DEFAULT '',
+                            success   INTEGER NOT NULL DEFAULT 0,
+                            ts        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
+
+                        CREATE TABLE IF NOT EXISTS settings (
+                            key   TEXT PRIMARY KEY,
+                            value TEXT NOT NULL DEFAULT ''
+                        );
+
+                        CREATE TABLE IF NOT EXISTS channels (
+                            id          SERIAL PRIMARY KEY,
+                            chat_id     TEXT UNIQUE NOT NULL,
+                            title       TEXT NOT NULL,
+                            invite_link TEXT DEFAULT '',
+                            created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
+                    """)
+
+                    # Check if migration needed
+                    cur.execute("SELECT value FROM settings WHERE key='sqlite_migrated'")
+                    migrated = cur.fetchone()
+                    if not migrated and DB_PATH.exists():
+                        _migrate_from_sqlite()
+
+                    # Restore cookies.txt from database if missing from disk
+                    try:
+                        cur.execute("SELECT value FROM settings WHERE key='active_cookies'")
+                        crow = cur.fetchone()
+                        if crow and crow[0] and not Path("cookies.txt").exists():
+                            Path("cookies.txt").write_text(crow[0], encoding="utf-8")
+                            logger.info("Restored cookies.txt from database")
+                    except Exception as e:
+                        logger.warning("Failed to restore cookies: %s", e)
+
+                    _load_caches(cur)
+                logger.info("Database initialized (Neon PostgreSQL mode with in-memory caching)")
+                return  # success — exit retry loop
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("init_db attempt %d/3 failed: %s", attempt, exc)
+                if attempt < 3:
+                    time.sleep(2 * attempt)  # 2s, 4s
+        raise RuntimeError(f"init_db failed after 3 attempts: {last_exc}") from last_exc
     else:
         with get_db_cursor() as cur:
             cur.executescript("""
