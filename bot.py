@@ -56,6 +56,32 @@ from database import (
     clear_all_channels,
 )
 from downloader import cleanup_session, download_instagram, is_instagram_url, convert_json_cookies_to_netscape
+import html
+from emojis import (
+    E_FLAME_BUTTERFLY,
+    E_WHITE_BUTTERFLY,
+    E_ARC_REACTOR,
+    E_CONFETTI,
+    E_SPARKLES,
+    E_LIGHTNING,
+    E_PINK_BOW,
+    E_COLOR_DOTS,
+    E_NEON_RINGS,
+    E_RING_LOADER,
+    E_GOLDEN_MAZE,
+    E_RED_WOLF,
+    E_BLUE_WOLF,
+    E_DARK_SHADOW,
+    E_BLACK_MASK,
+    E_HEART_BORDER,
+    E_BROKEN_HEART,
+    E_ARROW,
+    E_WARNING,
+    E_HEART_PULSE,
+    E_SKULL,
+    E_BABY_NEON,
+    E_DARK_CAT,
+)
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -140,7 +166,7 @@ async def alert_admin(bot, text: str) -> None:
             await bot.send_message(
                 chat_id=aid,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
             )
         except Exception as exc:
             logger.error("alert_admin failed for %s: %s", aid, exc)
@@ -187,14 +213,12 @@ async def cookie_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await alert_admin(
         context.bot,
-        "⏰ *Cookie Reminder*\n\n"
-        "Instagram cookies are still expired/invalid.\n\n"
-        "Steps to fix:\n"
-        "1️⃣ Export fresh `cookies.txt` from your browser\n"
-        "2️⃣ Update Secret File on Render\n"
-        "3️⃣ Redeploy or restart the bot\n"
-        "4️⃣ Open /admin → turn off Maintenance\n\n"
-        f"🕐 {now_str()}",
+        f"{E_WARNING} <b>Cookie Reminder</b>\n\n"
+        "Instagram cookies are still expired or invalid.\n\n"
+        f"{E_ARROW} <b>Fastest fix:</b>\n"
+        "Send your fresh <code>cookies.txt</code> or <code>.json</code> directly to this chat!\n"
+        "The bot will automatically update and resume downloads.\n\n"
+        f"🕐 <code>{now_str()}</code>",
     )
 
 
@@ -297,29 +321,29 @@ def build_channel_list_text() -> str:
     channels = get_all_channels()
     if not channels:
         return (
-            "📺 *Force-Sub Channel Management*\n"
+            f"{E_NEON_RINGS} <b>Force-Sub Channel Management</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚠️ *No required channels configured yet.*\n\n"
+            f"{E_WARNING} <b>No required channels configured yet.</b>\n\n"
             "Users can download without joining any channel.\n"
-            "Tap **➕ Add Channel** below to add one!"
+            f"{E_ARROW} Tap <b>➕ Add Channel</b> below to add one!"
         )
 
     lines = [
-        "📺 *Force-Sub Channel Management*",
+        f"{E_NEON_RINGS} <b>Force-Sub Channel Management</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Active Required Channels: *{len(channels)}*\n",
+        f"Active Required Channels: <b>{len(channels)}</b>\n",
     ]
     for i, ch in enumerate(channels, 1):
         cid = ch["chat_id"]
-        title = ch["title"]
+        title = html.escape(ch["title"])
         link = ch["invite_link"].strip()
-        link_str = f"[Invite Link]({link})" if link else "⚠️ _No link set (use /setlink)_"
-        lines.append(f"{i}️⃣ *{title}*")
-        lines.append(f"   • Chat ID: `{cid}`")
+        link_str = f'<a href="{html.escape(link)}">Invite Link</a>' if link else f"{E_WARNING} <i>No link set (use /setlink)</i>"
+        lines.append(f"{E_HEART_BORDER} <b>{title}</b>")
+        lines.append(f"   • Chat ID: <code>{cid}</code>")
         lines.append(f"   • Link: {link_str}\n")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("👇 Choose an action below:")
+    lines.append(f"{E_ARROW} Choose an action below:")
     return "\n".join(lines)
 
 
@@ -394,27 +418,27 @@ def kb_back_admin() -> InlineKeyboardMarkup:
 def build_stats_text() -> str:
     s          = get_stats()
     maint      = "🟢 ON" if is_maintenance() else "⚫ OFF"
-    cookie     = "🔴 Alert active" if get_setting("cookie_alert_active", "0") == "1" else "✅ OK"
+    cookie     = f"{E_WARNING} Alert active" if get_setting("cookie_alert_active", "0") == "1" else f"{E_SPARKLES} OK"
     channels   = get_all_channels()
     ch_count   = len(channels)
     ch_summary = f"{ch_count} Active" if ch_count > 0 else "None"
     q_active   = (MAX_CONCURRENT - _semaphore._value) if _semaphore else 0
     return (
-        "📊 *Bot Statistics*\n"
+        f"{E_ARC_REACTOR} <b>Bot Statistics & Health</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👥 *Users*\n"
-        f"  • Total registered : `{s['total_users']:,}`\n"
-        f"  • Active today     : `{s['active_today']:,}`\n\n"
-        "📥 *Downloads*\n"
-        f"  • Today            : `{s['today_ok']:,}` ✅   `{s['today_fail']:,}` ❌\n"
-        f"  • All time         : `{s['total_ok']:,}` ✅   `{s['total_fail']:,}` ❌\n\n"
-        "⚙️ *System*\n"
-        f"  • Active downloads : `{q_active}/{MAX_CONCURRENT}`\n"
-        f"  • Queue waiting    : `{_waiting_count}`\n"
+        f"👥 <b>Users</b>\n"
+        f"  • Total registered : <code>{s['total_users']:,}</code>\n"
+        f"  • Active today     : <code>{s['active_today']:,}</code>\n\n"
+        f"📥 <b>Downloads</b>\n"
+        f"  • Today            : <code>{s['today_ok']:,}</code> {E_CONFETTI}   <code>{s['today_fail']:,}</code> {E_BROKEN_HEART}\n"
+        f"  • All time         : <code>{s['total_ok']:,}</code> {E_CONFETTI}   <code>{s['total_fail']:,}</code> {E_BROKEN_HEART}\n\n"
+        f"{E_HEART_PULSE} <b>System</b>\n"
+        f"  • Active downloads : <code>{q_active}/{MAX_CONCURRENT}</code>\n"
+        f"  • Queue waiting    : <code>{_waiting_count}</code>\n"
         f"  • Maintenance      : {maint}\n"
         f"  • Cookie status    : {cookie}\n"
-        f"  • Required Channels: *{ch_summary}*\n\n"
-        f"🕐 `{now_str()}`"
+        f"  • Required Channels: <b>{ch_summary}</b>\n\n"
+        f"{E_COLOR_DOTS} <code>{now_str()}</code>"
     )
 
 
@@ -427,19 +451,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_admin(user.id):
         channels = get_all_channels()
         ch_count = len(channels)
-        missing_links = [c["title"] for c in channels if not c["invite_link"].strip()]
+        missing_links = [html.escape(c["title"]) for c in channels if not c["invite_link"].strip()]
         link_warn = ""
         if missing_links:
-            link_warn = f"\n\n⚠️ *Notice:* {len(missing_links)} channel(s) need an invite link: {', '.join(missing_links)}. Use `/setlink` or tap Channels below."
+            link_warn = f"\n\n{E_WARNING} <i>Notice:</i> {len(missing_links)} channel(s) need an invite link: {', '.join(missing_links)}. Use /setlink or tap Channels below."
 
         await update.message.reply_text(
-            f"👑 *Admin Control Panel*\n"
+            f"{E_GOLDEN_MAZE} <b>Admin Control Panel</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Welcome back, *{user.first_name}*!\n"
-            f"• Maintenance: *{'ON' if is_maintenance() else 'OFF'}*\n"
-            f"• Required Channels: *{ch_count} Active*{link_warn}\n\n"
-            "Select an option below or send /admin for inline controls.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"Welcome back, <b>{html.escape(user.first_name)}</b>!\n"
+            f"• Maintenance: <b>{'ON' if is_maintenance() else 'OFF'}</b>\n"
+            f"• Required Channels: <b>{ch_count} Active</b>{link_warn}\n\n"
+            f"{E_ARROW} Select an option below or send /admin for inline controls.",
+            parse_mode=ParseMode.HTML,
             reply_markup=rkb_admin(),
         )
         return
@@ -447,57 +471,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 2. Regular user: check membership across all required channels
     unjoined = await get_unjoined_channels(context.bot, user.id)
     if unjoined:
-        ch_list_str = "\n".join([f"  • *{c.get('title', 'Channel')}*" for c in unjoined])
+        ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{html.escape(c.get('title', 'Channel'))}</b>" for c in unjoined])
         await update.message.reply_text(
-            f"👋 *Hey {user.first_name}!* Welcome to *InstaBot* 🤖\n"
+            f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> 🤖\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "To download Instagram *Reels, Posts & IGTV*, "
+            "To download Instagram <b>Reels, Posts & IGTV</b>, "
             "you must first join our official channel(s):\n\n"
             f"{ch_list_str}\n\n"
-            "👉 Tap **Join** for each channel below, then tap **I've Joined All** to unlock the bot:",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_ARROW} Tap <b>Join</b> for each channel below, then tap <b>I've Joined All</b> to unlock the bot:",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_force_sub(unjoined),
         )
         return
 
     # 3. Regular user (all joined or no channel): send clean welcome
     await update.message.reply_text(
-        f"👋 *Hey {user.first_name}!* Welcome to *InstaBot* 🤖\n"
+        f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> 🤖\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "I download Instagram *Reels, Posts & IGTV* for you.\n\n"
-        "✨ *Features:*\n"
-        "• Best available quality ⚡\n"
-        "• Clean metadata 🔒 _(safe to repost)_\n"
+        "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
+        f"{E_SPARKLES} <b>Features:</b>\n"
+        f"• Best available quality {E_LIGHTNING}\n"
+        f"• Clean metadata {E_BLACK_MASK} <i>(safe to repost)</i>\n"
         "• Monospace caption for 1-tap copy 📋\n\n"
-        "🚀 *Paste any Instagram link to get started!*",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=rkb_user(),
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     channels = get_all_channels()
-    channel_line = f"• Must join *{len(channels)} required channel(s)*\n" if channels else ""
+    channel_line = f"• Must join <b>{len(channels)} required channel(s)</b>\n" if channels else ""
     await update.message.reply_text(
-        "📖 *InstaBot — Help*\n"
+        f"{E_ARC_REACTOR} <b>InstaBot — Help Guide</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*How to use:*\n"
+        f"{E_ARROW} <b>How to use:</b>\n"
         "1. Copy any public Instagram link\n"
         "2. Paste it here\n"
-        "3. Get your video or photos in seconds ⚡\n\n"
-        "*Supported links:*\n"
-        "`instagram.com/reel/...`\n"
-        "`instagram.com/p/...`\n"
-        "`instagram.com/tv/...`\n\n"
-        "*Requirements:*\n"
+        f"3. Get your video or photos in seconds {E_LIGHTNING}\n\n"
+        f"{E_SPARKLES} <b>Supported links:</b>\n"
+        "<code>instagram.com/reel/...</code>\n"
+        "<code>instagram.com/p/...</code>\n"
+        "<code>instagram.com/tv/...</code>\n\n"
+        f"{E_HEART_BORDER} <b>Requirements:</b>\n"
         f"{channel_line}"
         "• Public accounts only\n\n"
-        "*What you get:*\n"
+        f"{E_CONFETTI} <b>What you get:</b>\n"
         "• Highest quality video / images\n"
-        "• Metadata stripped (repost safe)\n"
-        "• Caption in `monospace` for easy copy\n\n"
-        "❓ Problems? Contact the admin.",
-        parse_mode=ParseMode.MARKDOWN,
+        f"• Metadata stripped {E_BLACK_MASK} (repost safe)\n"
+        "• Caption in <code>monospace</code> for easy copy\n\n"
+        f"{E_WARNING} Problems? Contact the admin.",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -505,9 +529,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Open admin panel — shows both reply keyboard + inline panel."""
     await update.message.reply_text(
-        "🔧 *Admin Panel*\n"
-        "_Select an option from the menu below:_",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_GOLDEN_MAZE} <b>Admin Panel</b>\n"
+        "<i>Select an option from the menu below:</i>",
+        parse_mode=ParseMode.HTML,
         reply_markup=rkb_admin(),
     )
     await update.message.reply_text(
@@ -518,27 +542,27 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @admin_only
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(build_stats_text(), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(build_stats_text(), parse_mode=ParseMode.HTML)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("state", None)
     context.user_data.pop("pending_link", None)
     keyboard = rkb_admin() if is_admin(update.effective_user.id) else rkb_user()
-    await update.message.reply_text("❌ Action cancelled.", reply_markup=keyboard)
+    await update.message.reply_text(f"{E_WARNING} Action cancelled.", reply_markup=keyboard)
 
 
 # ── Animated Progress Helper ───────────────────────────────────────────────────
 async def animate_progress(status_msg, stop_event: asyncio.Event) -> None:
     """
-    Lightweight animated progress ticker.
+    Lightweight animated progress ticker with premium custom emojis.
     Zero extra RAM, strictly respects Telegram rate limits (1.2s - 2.0s intervals).
     """
     frames = [
-        ("⚡ *Connecting to Instagram...*\n`[▰▱▱▱▱▱▱▱▱▱]` 15%\n_Initializing secure stream..._", 1.2),
-        ("📥 *Fetching Media Data...*\n`[▰▰▰▱▱▱▱▱▱▱]` 35%\n_Resolving highest quality source..._", 1.5),
-        ("🚀 *Downloading Media...*\n`[▰▰▰▰▰▰▱▱▱▱]` 65%\n_Bypassing restrictions..._", 1.8),
-        ("✨ *Processing & Cleaning Metadata...*\n`[▰▰▰▰▰▰▰▰▱▱]` 85%\n_Stripping tracking info for safety..._", 2.0),
+        (f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n<i>Initializing secure stream...</i>", 1.2),
+        (f"{E_RING_LOADER} <b>Fetching Media Data...</b>\n<code>[▰▰▰▱▱▱▱▱▱▱] 35%</code>\n<i>Resolving highest quality source...</i>", 1.5),
+        (f"{E_NEON_RINGS} <b>Downloading Media...</b>\n<code>[▰▰▰▰▰▰▱▱▱▱] 65%</code>\n<i>Bypassing restrictions...</i>", 1.8),
+        (f"{E_DARK_SHADOW} <b>Processing & Cleaning Metadata...</b>\n<code>[▰▰▰▰▰▰▰▰▱▱] 85%</code>\n<i>Stripping tracking info for safety...</i>", 2.0),
     ]
     for text, delay in frames:
         try:
@@ -547,7 +571,7 @@ async def animate_progress(status_msg, stop_event: asyncio.Event) -> None:
             await asyncio.sleep(delay)
             if stop_event.is_set():
                 break
-            await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+            await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
         except (TelegramError, Exception):
             pass
 
@@ -566,15 +590,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "adm_panel":
         await q.edit_message_text(
-            "🔧 *Admin Panel*",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_GOLDEN_MAZE} <b>Admin Panel</b>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_admin_panel(),
         )
 
     elif data == "adm_stats":
         await q.edit_message_text(
             build_stats_text(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_back_admin(),
         )
 
@@ -585,25 +609,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             stop_cookie_reminder(context.job_queue)
         label = "🟢 ON" if new_val == "1" else "⚫ OFF"
         await q.edit_message_text(
-            f"🔧 *Admin Panel*\n\n_Maintenance toggled → {label}_",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_ARC_REACTOR} <b>Admin Panel</b>\n\n<i>Maintenance toggled → {label}</i>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_admin_panel(),
         )
 
     elif data == "adm_broadcast":
         context.user_data["state"] = "awaiting_broadcast"
         await q.edit_message_text(
-            "📢 *Broadcast*\n\n"
+            f"{E_RED_WOLF} <b>Broadcast</b>\n\n"
             "Send the message you want to broadcast to all users.\n"
             "Supports text, photos, videos — anything.\n\n"
             "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
 
     elif data == "adm_chan_menu":
         await q.edit_message_text(
             build_channel_list_text(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
             disable_web_page_preview=True,
         )
@@ -612,16 +636,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["state"] = "awaiting_channel_add"
         context.user_data.pop("pending_ch_link", None)
         await q.edit_message_text(
-            "➕ *Add Required Channel*\n"
+            f"{E_NEON_RINGS} <b>Add Required Channel</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Send any of the following:\n"
-            "1️⃣ **Chat ID** (e.g. `-1001234567890`)\n"
-            "2️⃣ **Username** (e.g. `@mychannel`)\n"
-            "3️⃣ **Link** (e.g. `https://t.me/channel` or `-100... https://t.me/+...`)\n"
-            "4️⃣ Or simply **forward any post from your channel** here!\n\n"
-            "⚠️ *Make sure the bot is added as an Administrator in your channel first!*\n\n"
+            "1️⃣ <b>Chat ID</b> (e.g. <code>-1001234567890</code>)\n"
+            "2️⃣ <b>Username</b> (e.g. <code>@mychannel</code>)\n"
+            "3️⃣ <b>Link</b> (e.g. <code>https://t.me/channel</code> or <code>-100... https://t.me/+...</code>)\n"
+            "4️⃣ Or simply <b>forward any post from your channel</b> here!\n\n"
+            f"{E_WARNING} <i>Make sure the bot is added as an Administrator in your channel first!</i>\n\n"
             "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu")]]),
         )
 
@@ -631,10 +655,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await q.answer("No channels to remove!", show_alert=True)
             return
         await q.edit_message_text(
-            "🗑️ *Remove Required Channel*\n"
+            f"{E_WARNING} <b>Remove Required Channel</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Tap a channel below to remove it from the force-sub requirement:",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_delete_menu(),
         )
 
@@ -648,16 +672,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         channels = get_all_channels()
         if channels:
             await q.edit_message_text(
-                "🗑️ *Remove Required Channel*\n"
+                f"{E_WARNING} <b>Remove Required Channel</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 "Tap a channel below to remove it from the force-sub requirement:",
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=kb_channel_delete_menu(),
             )
         else:
             await q.edit_message_text(
                 build_channel_list_text(),
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=kb_channel_management(),
             )
 
@@ -666,7 +690,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await q.answer("🗑️ All channels removed!", show_alert=True)
         await q.edit_message_text(
             build_channel_list_text(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
         )
 
@@ -676,10 +700,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await q.answer("No channels configured yet! Add one first.", show_alert=True)
             return
         await q.edit_message_text(
-            "🔗 *Set / Update Channel Invite Link*\n"
+            f"{E_NEON_RINGS} <b>Set / Update Channel Invite Link</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Select a channel to set or update its invite link:",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_link_menu(),
         )
 
@@ -691,24 +715,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ch_title = target_ch["title"] if target_ch else target_cid
         cur_link = target_ch["invite_link"] if target_ch and target_ch["invite_link"] else "None"
         await q.edit_message_text(
-            f"🔗 *Update Invite Link*\n"
+            f"{E_NEON_RINGS} <b>Update Invite Link</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📺 Channel: *{ch_title}*\n"
-            f"🆔 Chat ID: `{target_cid}`\n"
-            f"🔗 Current Link: `{cur_link}`\n\n"
-            "Send the new Telegram invite link (e.g. `https://t.me/+...` or `https://t.me/channel`).\n"
-            "Send `-` to clear the link.\n"
+            f"{E_HEART_BORDER} Channel: <b>{html.escape(ch_title)}</b>\n"
+            f"🆔 Chat ID: <code>{target_cid}</code>\n"
+            f"🔗 Current Link: <code>{html.escape(cur_link)}</code>\n\n"
+            "Send the new Telegram invite link (e.g. <code>https://t.me/+...</code> or <code>https://t.me/channel</code>).\n"
+            "Send <code>-</code> to clear the link.\n"
             "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu")]]),
         )
 
     elif data == "adm_cookie_clear":
         stop_cookie_reminder(context.job_queue)
         await q.edit_message_text(
-            "✅ Cookie alert cleared.\n\n"
-            "Make sure you've updated `cookies.txt` on Render, then turn off Maintenance.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_SPARKLES} <b>Cookie alert cleared.</b>\n\n"
+            "Make sure you've updated <code>cookies.txt</code> on Render, then turn off Maintenance.",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_back_admin(),
         )
 
@@ -716,15 +740,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "check_joined":
         unjoined = await get_unjoined_channels(context.bot, uid)
         if not unjoined:
-            await q.answer("🎉 Verification successful! Welcome!", show_alert=False)
+            await q.answer("Verification successful! Welcome!", show_alert=False)
             try:
                 await q.edit_message_text(
-                    "🎉 *Access Granted!* 🚀\n"
+                    f"{E_CONFETTI} <b>Access Granted!</b> {E_LIGHTNING}\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
                     "All required channel memberships verified!\n"
-                    "You now have full access to *InstaBot* 🤖\n\n"
-                    "👉 *Paste any Instagram link below to get started!*",
-                    parse_mode=ParseMode.MARKDOWN,
+                    "You now have full access to <b>InstaBot</b> 🤖\n\n"
+                    f"{E_ARROW} <b>Paste any Instagram link below to get started!</b>",
+                    parse_mode=ParseMode.HTML,
                 )
             except Exception:
                 pass
@@ -741,14 +765,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 show_alert=True,
             )
             try:
-                ch_list_str = "\n".join([f"  • *{c.get('title', 'Channel')}*" for c in unjoined])
+                ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{html.escape(c.get('title', 'Channel'))}</b>" for c in unjoined])
                 await q.edit_message_text(
-                    f"🔒 *Subscription Incomplete* ⚠️\n"
+                    f"{E_WARNING} <b>Subscription Incomplete</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"You still need to join the following *{remaining}* channel(s):\n\n"
+                    f"You still need to join the following <b>{remaining}</b> channel(s):\n\n"
                     f"{ch_list_str}\n\n"
-                    "👉 Tap **Join** below, then tap **I've Joined All**:",
-                    parse_mode=ParseMode.MARKDOWN,
+                    f"{E_ARROW} Tap <b>Join</b> below, then tap <b>I've Joined All</b>:",
+                    parse_mode=ParseMode.HTML,
                     reply_markup=kb_force_sub(unjoined),
                 )
             except Exception:
@@ -794,7 +818,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         doc = message.document
         fname = (doc.file_name or "").lower()
         if fname.endswith(".txt") or fname.endswith(".json"):
-            status_up = await message.reply_text("📥 *Receiving cookie file...*", parse_mode=ParseMode.MARKDOWN)
+            status_up = await message.reply_text("📥 <b>Receiving cookie file...</b>", parse_mode=ParseMode.HTML)
             try:
                 tg_file = await context.bot.get_file(doc.file_id)
                 target_path = Path("cookies.txt")
@@ -827,19 +851,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     pass
 
                 await message.reply_text(
-                    "🍪 *Cookies Updated Successfully!*\n\n"
-                    "✅ Saved fresh `cookies.txt`\n"
-                    "☁️ Backed up to Neon PostgreSQL\n"
-                    "✅ Maintenance mode turned *OFF*\n"
-                    "✅ Cookie reminders stopped\n\n"
-                    "Your bot is ready to download reels! 🚀",
-                    parse_mode=ParseMode.MARKDOWN,
+                    f"{E_CONFETTI} <b>Cookies Updated Successfully!</b>\n\n"
+                    f"✅ Saved fresh <code>cookies.txt</code>\n"
+                    f"☁️ Backed up to Neon PostgreSQL\n"
+                    f"🟢 Maintenance mode turned <b>OFF</b>\n"
+                    f"🔕 Cookie reminders stopped\n\n"
+                    f"{E_LIGHTNING} Your bot is ready to download reels!",
+                    parse_mode=ParseMode.HTML,
                     reply_markup=rkb_admin(),
                 )
                 return
             except Exception as e:
                 logger.exception("Failed to process uploaded cookie file")
-                await status_up.edit_text(f"❌ Error saving cookies: `{e}`", parse_mode=ParseMode.MARKDOWN)
+                await status_up.edit_text(f"❌ Error saving cookies: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
                 return
 
     # ── Reply Keyboard Button Presses ─────────────────────────────────────
@@ -850,10 +874,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── Maintenance gate ───────────────────────────────────────────────────
     if is_maintenance() and not is_admin(user.id):
         await message.reply_text(
-            "🔧 *Under Maintenance*\n\n"
+            f"{E_ARC_REACTOR} <b>Under Maintenance</b>\n\n"
             "The bot is temporarily down for updates.\n"
             "Please check back in a few minutes!",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -861,14 +885,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_admin(user.id):
         unjoined = await get_unjoined_channels(context.bot, user.id)
         if unjoined:
-            ch_list_str = "\n".join([f"  • *{c.get('title', 'Channel')}*" for c in unjoined])
+            ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{html.escape(c.get('title', 'Channel'))}</b>" for c in unjoined])
             await message.reply_text(
-                "🔒 *Subscription Required*\n"
+                f"{E_WARNING} <b>Subscription Required</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 "You must join our official channel(s) before downloading:\n\n"
                 f"{ch_list_str}\n\n"
-                "👉 Tap **Join** for each channel below, then tap **I've Joined All**:",
-                parse_mode=ParseMode.MARKDOWN,
+                f"{E_ARROW} Tap <b>Join</b> for each channel below, then tap <b>I've Joined All</b>:",
+                parse_mode=ParseMode.HTML,
                 reply_markup=kb_force_sub(unjoined),
             )
             return
@@ -876,21 +900,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── URL check ─────────────────────────────────────────────────────────
     if not is_instagram_url(text):
         await message.reply_text(
-            "🤔 That doesn't look like an Instagram link.\n\n"
+            f"{E_DARK_CAT} That doesn't look like an Instagram link.\n\n"
             "Send something like:\n"
-            "`https://www.instagram.com/reel/ABC123/`\n"
-            "`https://www.instagram.com/p/ABC123/`",
-            parse_mode=ParseMode.MARKDOWN,
+            "<code>https://www.instagram.com/reel/ABC123/</code>\n"
+            "<code>https://www.instagram.com/p/ABC123/</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     # ── Queue capacity check ───────────────────────────────────────────────
     if _waiting_count >= MAX_QUEUE:
         await message.reply_text(
-            "🚦 *Queue Full*\n\n"
+            f"{E_WARNING} <b>Queue Full</b>\n\n"
             "The bot is very busy right now.\n"
             "Please try again in a minute!",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -900,16 +924,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if _semaphore and _semaphore._value == 0:
         status_msg = await message.reply_text(
-            f"⏳ *Queued* — you're #{q_pos} in line.\n"
+            f"{E_RING_LOADER} <b>Queued</b> — you're #{q_pos} in line.\n"
             "Hang tight, your download will start shortly...",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
     else:
         status_msg = await message.reply_text(
-            "⚡ *Connecting to Instagram...*\n"
-            "`[▰▱▱▱▱▱▱▱▱▱]` 15%\n"
-            "_Initializing secure stream..._",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n"
+            "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
+            "<i>Initializing secure stream...</i>",
+            parse_mode=ParseMode.HTML,
         )
 
     try:
@@ -941,59 +965,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                     await alert_admin(
                         context.bot,
-                        "🚨 *Cookie Error — Maintenance ON*\n\n"
-                        f"👤 User: {user.first_name} (@{user.username or 'N/A'}) · `{user.id}`\n"
-                        f"🔗 `{text[:100]}`\n"
+                        f"{E_WARNING} <b>Cookie Error — Maintenance ON</b>\n\n"
+                        f"👤 User: {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                        f"🔗 <code>{html.escape(text[:100])}</code>\n"
                         f"🕐 {now_str()}\n\n"
-                        f"```\n{result.get('raw_error', '')[:400]}\n```\n\n"
+                        f"<pre>{html.escape(result.get('raw_error', '')[:400])}</pre>\n\n"
                         "⚠️ Maintenance auto-enabled. Please send fresh cookies.txt!",
                     )
                     await status_msg.edit_text(
-                        "🔧 *Bot is entering maintenance mode.*\n\nPlease try again in a little while.",
-                        parse_mode=ParseMode.MARKDOWN,
+                        f"{E_ARC_REACTOR} <b>Bot is entering maintenance mode.</b>\n\nPlease try again in a little while.",
+                        parse_mode=ParseMode.HTML,
                     )
                 else:
                     await alert_admin(
                         context.bot,
-                        f"❌ *Download Failed*\n\n"
-                        f"👤 {user.first_name} (@{user.username or 'N/A'}) · `{user.id}`\n"
-                        f"🔗 `{text[:100]}`\n"
+                        f"{E_WARNING} <b>Download Failed</b>\n\n"
+                        f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                        f"🔗 <code>{html.escape(text[:100])}</code>\n"
                         f"🕐 {now_str()}\n"
-                        f"Type: `{err_type}`\n\n"
-                        f"```\n{result.get('raw_error', result.get('error', ''))[:400]}\n```",
+                        f"Type: <code>{err_type}</code>\n\n"
+                        f"<pre>{html.escape(result.get('raw_error', result.get('error', ''))[:400])}</pre>",
                     )
                     if err_type == "private":
                         await status_msg.edit_text(
-                            "🔒 *Private Account*\n\n"
+                            f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
                             "This post is from a private account.\n"
                             "I can only download from public accounts.",
-                            parse_mode=ParseMode.MARKDOWN,
+                            parse_mode=ParseMode.HTML,
                         )
                     elif err_type == "not_found":
                         await status_msg.edit_text(
-                            "🗑️ *Post Not Found*\n\n"
+                            f"{E_SKULL} <b>Post Not Found</b>\n\n"
                             "This Instagram reel or post was removed, deleted, or the link is broken.",
-                            parse_mode=ParseMode.MARKDOWN,
+                            parse_mode=ParseMode.HTML,
                         )
                     else:
                         await status_msg.edit_text(
-                            "😕 *Download Failed*\n\n"
+                            f"{E_BROKEN_HEART} <b>Download Failed</b>\n\n"
                             "Possible reasons:\n"
                             "• The link is invalid or expired\n"
                             "• The post was deleted\n"
                             "• Instagram temporarily restricted access\n\n"
                             "Please try again shortly.",
-                            parse_mode=ParseMode.MARKDOWN,
+                            parse_mode=ParseMode.HTML,
                         )
                 return
 
             # ── Upload Phase (Animated transition) ────────────────────────
             try:
                 await status_msg.edit_text(
-                    "📤 *Uploading to Telegram...*\n"
-                    "`[▰▰▰▰▰▰▰▰▰▰]` 100%\n"
-                    "_Almost there!_",
-                    parse_mode=ParseMode.MARKDOWN,
+                    f"{E_COLOR_DOTS} <b>Uploading to Telegram...</b>\n"
+                    "<code>[▰▰▰▰▰▰▰▰▰▰] 100%</code>\n"
+                    "<i>Almost there!</i>",
+                    parse_mode=ParseMode.HTML,
                 )
             except Exception:
                 pass
@@ -1010,8 +1034,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await context.bot.send_video(
                             chat_id=message.chat_id,
                             video=vf,
-                            caption="✅ *Done!* Metadata stripped 🔒",
-                            parse_mode=ParseMode.MARKDOWN,
+                            caption=f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                            parse_mode=ParseMode.HTML,
                             supports_streaming=True,
                             write_timeout=180,
                             read_timeout=120,
@@ -1026,8 +1050,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             await context.bot.send_photo(
                                 chat_id=message.chat_id,
                                 photo=pf,
-                                caption="✅ *Done!* Metadata stripped 🔒",
-                                parse_mode=ParseMode.MARKDOWN,
+                                caption=f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                                parse_mode=ParseMode.HTML,
                                 write_timeout=180,
                                 read_timeout=120,
                                 connect_timeout=30,
@@ -1040,8 +1064,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             for idx, img_p in enumerate(image_paths[:10]):  # Telegram max 10 per album
                                 f = open(img_p, "rb")
                                 opened_files.append(f)
-                                cap = "✅ *Done!* Metadata stripped 🔒" if idx == 0 else None
-                                pm = ParseMode.MARKDOWN if idx == 0 else None
+                                cap = f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}" if idx == 0 else None
+                                pm = ParseMode.HTML if idx == 0 else None
                                 media_group.append(InputMediaPhoto(media=f, caption=cap, parse_mode=pm))
                             await context.bot.send_media_group(chat_id=message.chat_id, media=media_group)
                         finally:
@@ -1053,13 +1077,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 # ── Monospace Caption (1-Tap Copy) ────────────────────────
                 if caption_text:
-                    safe   = caption_text.replace("`", "'")
-                    chunks = [safe[i : i + 3900] for i in range(0, len(safe), 3900)]
-                    header = "📋 *Caption* _(tap to copy):_\n\n"
+                    chunks = [caption_text[i : i + 3900] for i in range(0, len(caption_text), 3900)]
+                    header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
                     for chunk in chunks:
                         await message.reply_text(
-                            f"{header}`{chunk}`",
-                            parse_mode=ParseMode.MARKDOWN,
+                            f"{header}<code>{html.escape(chunk)}</code>",
+                            parse_mode=ParseMode.HTML,
                         )
                         header = ""
 
@@ -1076,16 +1099,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.exception("Send media failed")
                 await alert_admin(
                     context.bot,
-                    f"❌ *Send Failed*\n\n"
-                    f"👤 {user.first_name} · `{user.id}`\n"
+                    f"{E_WARNING} <b>Send Failed</b>\n\n"
+                    f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
                     f"🕐 {now_str()}\n"
-                    f"```\n{str(exc)[:400]}\n```",
+                    f"<pre>{html.escape(str(exc)[:400])}</pre>",
                 )
                 await status_msg.edit_text(
-                    "😕 *Couldn't send the media.*\n\n"
+                    f"{E_BROKEN_HEART} <b>Couldn't send the media.</b>\n\n"
                     "The file may be too large for Telegram.\n"
                     "Please try again.",
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=ParseMode.HTML,
                 )
 
             finally:
@@ -1096,15 +1119,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Unexpected error in handle_message")
         await alert_admin(
             context.bot,
-            f"💥 *Unexpected Error*\n\n"
-            f"👤 {user.first_name} · `{user.id}`\n"
+            f"{E_WARNING} <b>Unexpected Error</b>\n\n"
+            f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
             f"🕐 {now_str()}\n"
-            f"```\n{str(exc)[:400]}\n```",
+            f"<pre>{html.escape(str(exc)[:400])}</pre>",
         )
         try:
             await status_msg.edit_text("😕 Something went wrong. Please try again.")
         except Exception:
             pass
+
 
 
 # ── Button press router ────────────────────────────────────────────────────────
@@ -1114,63 +1138,63 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
     # ── User buttons ───────────────────────────────────────────────────────
     if text == BTN_HELP:
         channels = get_all_channels()
-        channel_line = f"• Must join *{len(channels)} required channel(s)*\n" if channels else ""
+        channel_line = f"• Must join <b>{len(channels)} required channel(s)</b>\n" if channels else ""
         await message.reply_text(
-            "📖 *Help — InstaBot*\n\n"
-            "*How to use:*\n"
-            "1. Copy any public Instagram link\n"
-            "2. Paste it in this chat\n"
-            "3. Get your video or photos in seconds ⚡\n\n"
-            "*Supported links:*\n"
-            "`instagram.com/reel/...`\n"
-            "`instagram.com/p/...`\n"
-            "`instagram.com/tv/...`\n\n"
-            "*Requirements:*\n"
+            f"{E_SPARKLES} <b>Help — InstaBot</b>\n\n"
+            f"<b>How to use:</b>\n"
+            f"1. Copy any public Instagram link\n"
+            f"2. Paste it in this chat\n"
+            f"3. Get your video or photos in seconds {E_LIGHTNING}\n\n"
+            f"<b>Supported links:</b>\n"
+            f"<code>instagram.com/reel/...</code>\n"
+            f"<code>instagram.com/p/...</code>\n"
+            f"<code>instagram.com/tv/...</code>\n\n"
+            f"<b>Requirements:</b>\n"
             f"{channel_line}"
-            "• Public accounts only\n\n"
-            "*What you get:*\n"
-            "• Highest quality video & photos\n"
-            "• All metadata stripped 🔒\n"
-            "• Caption in `monospace` for easy copy",
-            parse_mode=ParseMode.MARKDOWN,
+            f"• Public accounts only\n\n"
+            f"<b>What you get:</b>\n"
+            f"• Highest quality video & photos\n"
+            f"• All metadata stripped {E_BLACK_MASK}\n"
+            f"• Caption in <code>monospace</code> for easy copy",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     if text == BTN_ABOUT:
         channels = get_all_channels()
         await message.reply_text(
-            "ℹ️ *About InstaBot*\n\n"
-            "A fast, clean Instagram downloader bot.\n\n"
-            "⚙️ *Tech stack:*\n"
-            "• `yt-dlp` — download engine\n"
-            "• `ffmpeg` — metadata stripper\n"
-            "• `python-telegram-bot` — bot framework\n"
-            "• `SQLite` — multi-channel & stats database\n\n"
-            f"📺 Active Required Channels: *{len(channels)}*\n\n"
-            "🔒 *Privacy:*\n"
-            "All metadata is stripped before sending.\n"
-            "Temp files are deleted immediately after.\n\n"
-            "📬 Issues? Contact the admin.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_ARC_REACTOR} <b>About InstaBot</b>\n\n"
+            f"A fast, clean Instagram downloader bot.\n\n"
+            f"{E_LIGHTNING} <b>Tech stack:</b>\n"
+            f"• <code>yt-dlp</code> — download engine\n"
+            f"• <code>ffmpeg</code> — metadata stripper\n"
+            f"• <code>python-telegram-bot</code> — bot framework\n"
+            f"• <code>PostgreSQL / Neon</code> — multi-channel & stats database\n\n"
+            f"{E_NEON_RINGS} Active Required Channels: <b>{len(channels)}</b>\n\n"
+            f"{E_BLACK_MASK} <b>Privacy:</b>\n"
+            f"All metadata is stripped before sending.\n"
+            f"Temp files are deleted immediately after.\n\n"
+            f"📬 Issues? Contact the admin.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     # ── Admin-only buttons ─────────────────────────────────────────────────
     if not is_admin(user.id):
-        await message.reply_text("⛔ Admin only.")
+        await message.reply_text(f"{E_WARNING} Admin only.")
         return
 
     if text == BTN_STATS:
-        await message.reply_text(build_stats_text(), parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text(build_stats_text(), parse_mode=ParseMode.HTML)
 
     elif text == BTN_BROADCAST:
         context.user_data["state"] = "awaiting_broadcast"
         await message.reply_text(
-            "📢 *Broadcast*\n\n"
-            "Send the message to broadcast to all users.\n"
-            "Supports text, photos, videos — anything.\n\n"
-            "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_RED_WOLF} <b>Broadcast</b>\n\n"
+            f"Send the message to broadcast to all users.\n"
+            f"Supports text, photos, videos — anything.\n\n"
+            f"Send /cancel to abort.",
+            parse_mode=ParseMode.HTML,
         )
 
     elif text.startswith("🔧 Maintenance:"):
@@ -1180,15 +1204,15 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             stop_cookie_reminder(context.job_queue)
         label = "🟢 ON" if new_val == "1" else "⚫ OFF"
         await message.reply_text(
-            f"🔧 Maintenance mode → *{label}*",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_RING_LOADER} Maintenance mode → <b>{label}</b>",
+            parse_mode=ParseMode.HTML,
             reply_markup=rkb_admin(),
         )
 
     elif text.startswith("📺 Channels") or text == BTN_CHANNELS:
         await message.reply_text(
             build_channel_list_text(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
             disable_web_page_preview=True,
         )
@@ -1197,20 +1221,20 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
         if get_setting("cookie_alert_active", "0") == "1":
             stop_cookie_reminder(context.job_queue)
             await message.reply_text(
-                "✅ Cookie alert cleared.\n\n"
-                "Remember to update `cookies.txt` on Render, then turn off Maintenance.",
-                parse_mode=ParseMode.MARKDOWN,
+                f"{E_CONFETTI} <b>Cookie alert cleared.</b>\n\n"
+                f"Remember to update cookies on Render or send fresh file, then turn off Maintenance.",
+                parse_mode=ParseMode.HTML,
                 reply_markup=rkb_admin(),
             )
         else:
             await message.reply_text(
-                "🍪 Cookie status: *✅ OK*\n\nNo active alerts.",
-                parse_mode=ParseMode.MARKDOWN,
+                f"{E_CONFETTI} Cookie status: <b>OK</b>\n\nNo active alerts.",
+                parse_mode=ParseMode.HTML,
             )
 
     elif text == BTN_CLOSE_MENU:
         await message.reply_text(
-            "✅ Admin menu closed. You're back to normal user mode.",
+            f"{E_WHITE_BUTTERFLY} Admin menu closed. You're back to normal user mode.",
             reply_markup=rkb_user(),
         )
 
@@ -1219,7 +1243,7 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
 async def _do_broadcast(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("state", None)
     user_ids = get_all_user_ids()
-    progress = await message.reply_text(f"📢 Broadcasting to {len(user_ids):,} users...")
+    progress = await message.reply_text(f"{E_RING_LOADER} Broadcasting to {len(user_ids):,} users...")
 
     sent   = 0
     failed = 0
@@ -1236,11 +1260,11 @@ async def _do_broadcast(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.sleep(0.05)   # ~20 msgs/s, stay under Telegram limits
 
     await progress.edit_text(
-        f"📢 *Broadcast Complete*\n\n"
-        f"✅ Sent   : `{sent:,}`\n"
-        f"❌ Failed : `{failed:,}` _(blocked/deleted)_\n"
+        f"{E_SPARKLES} <b>Broadcast Complete</b>\n\n"
+        f"✅ Sent   : <code>{sent:,}</code>\n"
+        f"{E_WARNING} Failed : <code>{failed:,}</code> <i>(blocked/deleted)</i>\n"
         f"🕐 {now_str()}",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -1286,32 +1310,35 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 context.user_data["pending_ch_link"] = custom_link
                 await message.reply_text(
-                    "🔗 *Private Invite Link Received!*\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "Telegram Bot API needs the channel's **Chat ID** to verify member subscriptions.\n\n"
-                    "👉 **Two easy ways to finish:**\n"
-                    "1️⃣ **Forward any post** from that channel into this chat.\n"
-                    "2️⃣ Or send its **Chat ID** (e.g. `-1001234567890`).\n\n"
-                    "_I've saved your invite link and will attach it automatically!_\n"
-                    "Send /cancel to abort.",
-                    parse_mode=ParseMode.MARKDOWN,
+                    f"{E_NEON_RINGS} <b>Private Invite Link Received!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Telegram Bot API needs the channel's <b>Chat ID</b> to verify member subscriptions.\n\n"
+                    f"👉 <b>Two easy ways to finish:</b>\n"
+                    f"1️⃣ <b>Forward any post</b> from that channel into this chat.\n"
+                    f"2️⃣ Or send its <b>Chat ID</b> (e.g. <code>-1001234567890</code>).\n\n"
+                    f"<i>I've saved your invite link and will attach it automatically!</i>\n"
+                    f"Send /cancel to abort.",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
     if not target:
         await message.reply_text(
-            "❌ *Invalid format.*\n\n"
-            "Please provide:\n"
-            "• **Chat ID** (e.g. `-1001234567890`)\n"
-            "• **Username** (e.g. `@mychannel`)\n"
-            "• **Link** (e.g. `https://t.me/mychannel` or `-100... https://t.me/+...`)\n"
-            "• Or **forward any post from your channel** here!\n\n"
-            "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_WARNING} <b>Invalid format.</b>\n\n"
+            f"Please provide:\n"
+            f"• <b>Chat ID</b> (e.g. <code>-1001234567890</code>)\n"
+            f"• <b>Username</b> (e.g. <code>@mychannel</code>)\n"
+            f"• <b>Link</b> (e.g. <code>https://t.me/mychannel</code> or <code>-100... https://t.me/+...</code>)\n"
+            f"• Or <b>forward any post from your channel</b> here!\n\n"
+            f"Send /cancel to abort.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    status_msg = await message.reply_text("🔍 *Verifying channel and checking bot permissions...*", parse_mode=ParseMode.MARKDOWN)
+    status_msg = await message.reply_text(
+        f"{E_RING_LOADER} <b>Verifying channel and checking bot permissions...</b>",
+        parse_mode=ParseMode.HTML,
+    )
 
     # 3. Verify channel exists and bot can access it
     try:
@@ -1319,15 +1346,15 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.warning("get_chat failed for %s: %s", target, exc)
         await status_msg.edit_text(
-            f"❌ *Could not find or access that channel!*\n\n"
-            f"Target: `{target}`\n"
-            f"Error: `{str(exc)}`\n\n"
-            "⚠️ **Please make sure:**\n"
-            "1. You have already added this bot to your channel!\n"
-            "2. The Chat ID or username is typed correctly.\n"
-            "3. Or forward any message directly from the channel into this chat.\n\n"
-            "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_WARNING} <b>Could not find or access that channel!</b>\n\n"
+            f"Target: <code>{html.escape(str(target))}</code>\n"
+            f"Error: <code>{html.escape(str(exc))}</code>\n\n"
+            f"⚠️ <b>Please make sure:</b>\n"
+            f"1. You have already added this bot to your channel!\n"
+            f"2. The Chat ID or username is typed correctly.\n"
+            f"3. Or forward any message directly from the channel into this chat.\n\n"
+            f"Send /cancel to abort.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -1337,25 +1364,26 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         bot_member = await context.bot.get_chat_member(chat_id=chat.id, user_id=me.id)
         if bot_member.status not in ("administrator", "creator"):
             await status_msg.edit_text(
-                f"❌ *Bot is NOT an Administrator in {chat.title}!* ⛔\n\n"
-                f"📺 Channel: *{chat.title}*\n"
-                f"🆔 Chat ID: `{chat.id}`\n"
-                f"🤖 Bot Role: `{bot_member.status}`\n\n"
-                f"⚠️ Telegram **requires** bots to be an Administrator to verify if users have joined.\n\n"
-                f"👉 **Steps to fix:**\n"
-                f"1. Open channel *{chat.title}* in Telegram\n"
+                f"{E_WARNING} <b>Bot is NOT an Administrator in {html.escape(chat.title or '')}!</b> ⛔\n\n"
+                f"📺 Channel: <b>{html.escape(chat.title or '')}</b>\n"
+                f"🆔 Chat ID: <code>{chat.id}</code>\n"
+                f"🤖 Bot Role: <code>{bot_member.status}</code>\n\n"
+                f"⚠️ Telegram <b>requires</b> bots to be an Administrator to verify if users have joined.\n\n"
+                f"👉 <b>Steps to fix:</b>\n"
+                f"1. Open channel <b>{html.escape(chat.title or '')}</b> in Telegram\n"
                 f"2. Tap Channel Title ➔ Edit ➔ Administrators\n"
                 f"3. Add @{me.username} as an Admin\n"
-                f"4. Send the Chat ID `{chat.id}` or forward a message again here!",
-                parse_mode=ParseMode.MARKDOWN,
+                f"4. Send the Chat ID <code>{chat.id}</code> or forward a message again here!",
+                parse_mode=ParseMode.HTML,
             )
             return
     except Exception as exc:
         logger.warning("get_chat_member failed for bot in %s: %s", chat.id, exc)
         await status_msg.edit_text(
-            f"❌ *Failed to verify bot admin permissions in {chat.title}:*\n\n`{str(exc)}`\n\n"
-            "Make sure the bot is an Administrator in the channel.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_WARNING} <b>Failed to verify bot admin permissions in {html.escape(chat.title or '')}:</b>\n\n"
+            f"<code>{html.escape(str(exc))}</code>\n\n"
+            f"Make sure the bot is an Administrator in the channel.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -1385,27 +1413,27 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if invite_link:
         await message.reply_text(
-            f"✅ *Channel Added Successfully!* 🎉\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📺 *Channel:* {title}\n"
-            f"🆔 *Chat ID:* `{chat.id}`\n"
-            f"🤖 *Bot Role:* Administrator ✅\n"
-            f"🔗 *Invite Link:* [Click Here]({invite_link})\n\n"
-            "🔒 Users will now be required to join this channel before downloading.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_CONFETTI} <b>Channel Added Successfully!</b> 🎉\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📺 <b>Channel:</b> {html.escape(title)}\n"
+            f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
+            f"🤖 <b>Bot Role:</b> Administrator ✅\n"
+            f"🔗 <b>Invite Link:</b> <a href=\"{invite_link}\">Click Here</a>\n\n"
+            f"{E_BLACK_MASK} Users will now be required to join this channel before downloading.",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
         )
     else:
         context.user_data["state"] = f"awaiting_ch_link:{chat.id}"
         await message.reply_text(
-            f"✅ *Channel Added:* *{title}*\n"
-            f"🆔 *Chat ID:* `{chat.id}`\n"
-            f"🤖 *Bot Role:* Administrator ✅\n\n"
-            "⚠️ *Invite Link Needed for Private Channel*\n"
-            "The bot could not auto-generate an invite link.\n\n"
-            "👉 **Please send the channel's invite link now** (e.g. `https://t.me/+...`):\n"
-            "*(Or send /cancel to set it later)*",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_CONFETTI} <b>Channel Added:</b> <b>{html.escape(title)}</b>\n"
+            f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
+            f"🤖 <b>Bot Role:</b> Administrator ✅\n\n"
+            f"{E_WARNING} <b>Invite Link Needed for Private Channel</b>\n"
+            f"The bot could not auto-generate an invite link.\n\n"
+            f"👉 <b>Please send the channel's invite link now</b> (e.g. <code>https://t.me/+...</code>):\n"
+            f"<i>(Or send /cancel to set it later)</i>",
+            parse_mode=ParseMode.HTML,
         )
 
 
@@ -1415,13 +1443,13 @@ async def _do_update_channel_link(message, context: ContextTypes.DEFAULT_TYPE, c
 
     if text == "-":
         update_channel_link(chat_id, "")
-        await message.reply_text("✅ Channel invite link cleared.", reply_markup=kb_channel_management())
+        await message.reply_text(f"{E_CONFETTI} Channel invite link cleared.", reply_markup=kb_channel_management())
         return
 
     if not (text.startswith("https://t.me/") or text.startswith("http://t.me/") or text.startswith("@")):
         await message.reply_text(
-            "❌ *Invalid link format.*\n\nPlease send a valid link like `https://t.me/+...` or `https://t.me/channel`.\nUse /setlink to try again.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_WARNING} <b>Invalid link format.</b>\n\nPlease send a valid link like <code>https://t.me/+...</code> or <code>https://t.me/channel</code>.\nUse /setlink to try again.",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
         )
         return
@@ -1432,13 +1460,13 @@ async def _do_update_channel_link(message, context: ContextTypes.DEFAULT_TYPE, c
     title = ch["title"] if ch else chat_id
 
     await message.reply_text(
-        f"✅ *Invite Link Updated!* 🎉\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📺 Channel: *{title}*\n"
-        f"🆔 Chat ID:* `{chat_id}`\n"
-        f"🔗 Link: {text}\n\n"
-        "The **Join** button is now updated for users!",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_CONFETTI} <b>Invite Link Updated!</b> 🎉\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📺 Channel: <b>{html.escape(title)}</b>\n"
+        f"🆔 Chat ID: <code>{chat_id}</code>\n"
+        f"🔗 Link: {html.escape(text)}\n\n"
+        f"The <b>Join</b> button is now updated for users!",
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_channel_management(),
     )
 
@@ -1449,7 +1477,7 @@ async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Manage force-sub channels."""
     await update.message.reply_text(
         build_channel_list_text(),
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_channel_management(),
         disable_web_page_preview=True,
     )
@@ -1466,15 +1494,15 @@ async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data["state"] = "awaiting_channel_add"
     await update.message.reply_text(
-        "➕ *Add Required Channel*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Send any of the following:\n"
-        "1️⃣ **Chat ID** (e.g. `-1001234567890`)\n"
-        "2️⃣ **Username** (e.g. `@mychannel`)\n"
-        "3️⃣ **Link** (e.g. `https://t.me/channel` or `-100... https://t.me/+...`)\n"
-        "4️⃣ Or forward any post from your channel here!\n\n"
-        "Send /cancel to abort.",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_NEON_RINGS} <b>Add Required Channel</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Send any of the following:\n"
+        f"1️⃣ <b>Chat ID</b> (e.g. <code>-1001234567890</code>)\n"
+        f"2️⃣ <b>Username</b> (e.g. <code>@mychannel</code>)\n"
+        f"3️⃣ <b>Link</b> (e.g. <code>https://t.me/channel</code> or <code>-100... https://t.me/+...</code>)\n"
+        f"4️⃣ Or forward any post from your channel here!\n\n"
+        f"Send /cancel to abort.",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -1486,19 +1514,26 @@ async def cmd_delchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         target = args[0].strip()
         ok = remove_channel(target)
         if ok:
-            await update.message.reply_text(f"✅ Channel `{target}` removed.", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_channel_management())
+            await update.message.reply_text(
+                f"{E_CONFETTI} Channel <code>{html.escape(target)}</code> removed.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_channel_management(),
+            )
         else:
-            await update.message.reply_text(f"❌ Channel `{target}` not found in database.", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                f"{E_WARNING} Channel <code>{html.escape(target)}</code> not found in database.",
+                parse_mode=ParseMode.HTML,
+            )
         return
 
     channels = get_all_channels()
     if not channels:
-        await update.message.reply_text("⚠️ No required channels configured yet.")
+        await update.message.reply_text(f"{E_WARNING} No required channels configured yet.")
         return
 
     await update.message.reply_text(
-        "🗑️ *Select a channel to remove:*",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_WARNING} <b>Select a channel to remove:</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_channel_delete_menu(),
     )
 
@@ -1509,31 +1544,34 @@ async def cmd_setlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     args = context.args
     channels = get_all_channels()
     if not channels:
-        await update.message.reply_text("⚠️ No channels configured yet. Add one first with /addchannel.")
+        await update.message.reply_text(f"{E_WARNING} No channels configured yet. Add one first with /addchannel.")
         return
 
     if len(args) >= 2:
         cid = args[0].strip()
         link = args[1].strip()
         update_channel_link(cid, "" if link == "-" else link)
-        await update.message.reply_text(f"✅ Link updated for `{cid}`: {link}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"{E_CONFETTI} Link updated for <code>{html.escape(cid)}</code>: {html.escape(link)}",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if len(channels) == 1:
         cid = channels[0]["chat_id"]
         context.user_data["state"] = f"awaiting_ch_link:{cid}"
         await update.message.reply_text(
-            f"🔗 *Set Invite Link for {channels[0]['title']}*\n\n"
-            f"Send the invite link (e.g. `https://t.me/+...` or `https://t.me/channel`):\n"
-            "Send `-` to clear.\n"
-            "Send /cancel to abort.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"{E_NEON_RINGS} <b>Set Invite Link for {html.escape(channels[0]['title'])}</b>\n\n"
+            f"Send the invite link (e.g. <code>https://t.me/+...</code> or <code>https://t.me/channel</code>):\n"
+            f"Send <code>-</code> to clear.\n"
+            f"Send /cancel to abort.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
     await update.message.reply_text(
-        "🔗 *Select a channel to update its invite link:*",
-        parse_mode=ParseMode.MARKDOWN,
+        f"{E_NEON_RINGS} <b>Select a channel to update its invite link:</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_channel_link_menu(),
     )
 
@@ -1544,9 +1582,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         await alert_admin(
             context.bot,
-            f"💥 *Unhandled Error*\n\n"
+            f"{E_WARNING} <b>Unhandled Error</b>\n\n"
             f"🕐 {now_str()}\n"
-            f"```\n{str(context.error)[:400]}\n```",
+            f"<pre>{html.escape(str(context.error)[:400])}</pre>",
         )
     except Exception:
         pass
