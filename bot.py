@@ -83,6 +83,19 @@ from emojis import (
     E_SKULL,
     E_BABY_NEON,
     E_DARK_CAT,
+    E_HEART_RED,
+    E_HEART_FIRE,
+    E_CHECK_MARK,
+    E_CROSS_MARK,
+    E_FIRE_FLAME,
+    E_ROCKET,
+    E_DIAMOND,
+    E_CHART_BAR,
+    E_SHIELD,
+    E_STAR_GLOW,
+    E_CLOCK_TIME,
+    E_PIN_LINK,
+    E_TV_SCREEN,
 )
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
@@ -134,7 +147,7 @@ def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
-            await update.effective_message.reply_text("⛔ Admin only.")
+            await update.effective_message.reply_text(f"{E_WARNING} <b>Admin only.</b>", parse_mode=ParseMode.HTML)
             return
         return await func(update, context)
     return wrapper
@@ -220,7 +233,7 @@ async def cookie_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{E_ARROW} <b>Fastest fix:</b>\n"
         "Send your fresh <code>cookies.txt</code> or <code>.json</code> directly to this chat!\n"
         "The bot will automatically update and resume downloads.\n\n"
-        f"🕐 <code>{now_str()}</code>",
+        f"{E_CLOCK_TIME} <code>{now_str()}</code>",
     )
 
 
@@ -243,10 +256,8 @@ def stop_cookie_reminder(job_queue) -> None:
 
 
 # ── Reply Keyboard Button Labels ──────────────────────────────────────────────
-# ── Reply Keyboard Button Labels ──────────────────────────────────────────────
-# User buttons
+# User buttons (About removed - Help is enough)
 BTN_HELP        = "📖 Help"
-BTN_ABOUT       = "ℹ️ About Bot"
 
 # Admin buttons
 BTN_STATS       = "📊 Stats"
@@ -257,7 +268,7 @@ BTN_COOKIE      = "🍪 Cookie Status"
 BTN_CLOSE_MENU  = "❌ Close Menu"
 
 ALL_BTNS = {
-    BTN_HELP, BTN_ABOUT,
+    BTN_HELP,
     BTN_STATS, BTN_MAINT, BTN_BROADCAST,
     BTN_CHANNELS, BTN_COOKIE, BTN_CLOSE_MENU,
 }
@@ -265,14 +276,19 @@ ALL_BTNS = {
 
 # ── Reply Keyboard Builders ────────────────────────────────────────────────────
 def rkb_user() -> ReplyKeyboardMarkup:
-    """Persistent bottom keyboard for regular users."""
+    """Persistent bottom keyboard for regular users (clean - Help only)."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_HELP), KeyboardButton(BTN_ABOUT)],
+            [KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Paste an Instagram link...",
     )
+
+
+def kb_cancel() -> InlineKeyboardMarkup:
+    """Reusable inline cancel button for prompts."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="adm_cancel")]])
 
 
 def rkb_admin() -> ReplyKeyboardMarkup:
@@ -427,8 +443,8 @@ def kb_back_admin() -> InlineKeyboardMarkup:
 # ── Stats text helper ──────────────────────────────────────────────────────────
 def build_stats_text() -> str:
     s          = get_stats()
-    maint      = "🟢 ON" if is_maintenance() else "⚫ OFF"
-    cookie     = f"{E_WARNING} Alert active" if get_setting("cookie_alert_active", "0") == "1" else f"{E_SPARKLES} OK"
+    maint      = f"{E_CHECK_MARK} <b>ON</b>" if is_maintenance() else f"{E_CROSS_MARK} <b>OFF</b>"
+    cookie     = f"{E_WARNING} Alert active" if get_setting("cookie_alert_active", "0") == "1" else f"{E_CHECK_MARK} OK"
     channels   = get_all_channels()
     ch_count   = len(channels)
     ch_summary = f"{ch_count} Active" if ch_count > 0 else "None"
@@ -436,10 +452,10 @@ def build_stats_text() -> str:
     return (
         f"{E_ARC_REACTOR} <b>Bot Statistics & Health</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 <b>Users</b>\n"
+        f"{E_COLOR_DOTS} <b>Users</b>\n"
         f"  • Total registered : <code>{s['total_users']:,}</code>\n"
         f"  • Active today     : <code>{s['active_today']:,}</code>\n\n"
-        f"📥 <b>Downloads</b>\n"
+        f"{E_NEON_RINGS} <b>Downloads</b>\n"
         f"  • Today            : <code>{s['today_ok']:,}</code> {E_CONFETTI}   <code>{s['today_fail']:,}</code> {E_BROKEN_HEART}\n"
         f"  • All time         : <code>{s['total_ok']:,}</code> {E_CONFETTI}   <code>{s['total_fail']:,}</code> {E_BROKEN_HEART}\n\n"
         f"{E_HEART_PULSE} <b>System</b>\n"
@@ -448,7 +464,7 @@ def build_stats_text() -> str:
         f"  • Maintenance      : {maint}\n"
         f"  • Cookie status    : {cookie}\n"
         f"  • Required Channels: <b>{ch_summary}</b>\n\n"
-        f"{E_COLOR_DOTS} <code>{now_str()}</code>"
+        f"{E_CLOCK_TIME} <code>{now_str()}</code>"
     )
 
 
@@ -483,7 +499,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if unjoined:
         ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{html.escape(c.get('title', 'Channel'))}</b>" for c in unjoined])
         await update.message.reply_text(
-            f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> 🤖\n"
+            f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> {E_SPARKLES}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "To download Instagram <b>Reels, Posts & IGTV</b>, "
             "you must first join our official channel(s):\n\n"
@@ -496,13 +512,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 3. Regular user (all joined or no channel): send clean welcome
     await update.message.reply_text(
-        f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> 🤖\n"
+        f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> {E_SPARKLES}\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
         f"{E_SPARKLES} <b>Features:</b>\n"
         f"• Best available quality {E_LIGHTNING}\n"
         f"• Clean metadata {E_BLACK_MASK} <i>(safe to repost)</i>\n"
-        "• Monospace caption for 1-tap copy 📋\n\n"
+        f"• Monospace caption for 1-tap copy {E_DIAMOND}\n\n"
         f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=rkb_user(),
@@ -558,8 +574,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("state", None)
     context.user_data.pop("pending_link", None)
+    context.user_data.pop("pending_ch_link", None)
     keyboard = rkb_admin() if is_admin(update.effective_user.id) else rkb_user()
-    await update.message.reply_text(f"{E_WARNING} Action cancelled.", reply_markup=keyboard)
+    await update.message.reply_text(
+        f"{E_WARNING} <b>Action cancelled.</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
 
 
 # ── Animated Progress Helper ───────────────────────────────────────────────────
@@ -594,6 +615,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await q.answer()
 
     # ── Admin callbacks (guard every one) ─────────────────────────────────
+    if data in ("adm_cancel", "cancel"):
+        context.user_data.pop("state", None)
+        context.user_data.pop("pending_link", None)
+        context.user_data.pop("pending_ch_link", None)
+        await q.answer("Action cancelled.")
+        await q.edit_message_text(
+            f"{E_WARNING} <b>Action cancelled.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_admin_panel() if is_admin(uid) else None,
+        )
+        return
+
     if data == "no_link_notice":
         await q.answer(
             "⚠️ This channel's invite link hasn't been set yet.\n"
@@ -625,7 +658,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         set_setting("maintenance_mode", new_val)
         if new_val == "0":
             stop_cookie_reminder(context.job_queue)
-        label = "🟢 ON" if new_val == "1" else "⚫ OFF"
+        label = f"{E_CHECK_MARK} ON" if new_val == "1" else f"{E_CROSS_MARK} OFF"
         await q.edit_message_text(
             f"{E_ARC_REACTOR} <b>Admin Panel</b>\n\n<i>Maintenance toggled → {label}</i>",
             parse_mode=ParseMode.HTML,
@@ -638,8 +671,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{E_RED_WOLF} <b>Broadcast</b>\n\n"
             "Send the message you want to broadcast to all users.\n"
             "Supports text, photos, videos — anything.\n\n"
-            "Send /cancel to abort.",
+            "Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
 
     elif data == "adm_chan_menu":
@@ -662,9 +696,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "3️⃣ <b>Link</b> (e.g. <code>https://t.me/channel</code> or <code>-100... https://t.me/+...</code>)\n"
             "4️⃣ Or simply <b>forward any post from your channel</b> here!\n\n"
             f"{E_WARNING} <i>Make sure the bot is added as an Administrator in your channel first!</i>\n\n"
-            "Send /cancel to abort.",
+            "Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu")]]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu"), InlineKeyboardButton("❌ Cancel", callback_data="adm_cancel")]
+            ]),
         )
 
     elif data == "adm_chan_del_menu":
@@ -736,13 +772,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{E_NEON_RINGS} <b>Update Invite Link</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{E_HEART_BORDER} Channel: <b>{html.escape(ch_title)}</b>\n"
-            f"🆔 Chat ID: <code>{target_cid}</code>\n"
-            f"🔗 Current Link: <code>{html.escape(cur_link)}</code>\n\n"
+            f"{E_PIN_LINK} Chat ID: <code>{target_cid}</code>\n"
+            f"{E_PIN_LINK} Current Link: <code>{html.escape(cur_link)}</code>\n\n"
             "Send the new Telegram invite link (e.g. <code>https://t.me/+...</code> or <code>https://t.me/channel</code>).\n"
             "Send <code>-</code> to clear the link.\n"
-            "Send /cancel to abort.",
+            "Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu")]]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back to Channels", callback_data="adm_chan_menu"), InlineKeyboardButton("❌ Cancel", callback_data="adm_cancel")]
+            ]),
         )
 
     elif data == "adm_cookie_clear":
@@ -764,7 +802,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"{E_CONFETTI} <b>Access Granted!</b> {E_LIGHTNING}\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
                     "All required channel memberships verified!\n"
-                    "You now have full access to <b>InstaBot</b> 🤖\n\n"
+                    f"You now have full access to <b>InstaBot</b> {E_SPARKLES}\n\n"
                     f"{E_ARROW} <b>Paste any Instagram link below to get started!</b>",
                     parse_mode=ParseMode.HTML,
                 )
@@ -772,7 +810,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
             await context.bot.send_message(
                 chat_id=uid,
-                text="Choose an option or paste any Instagram link below 👇",
+                text=f"{E_ARROW} <b>Choose an option or paste any Instagram link below:</b>",
+                parse_mode=ParseMode.HTML,
                 reply_markup=rkb_user(),
             )
         else:
@@ -807,6 +846,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     upsert_user(user.id, user.username, user.first_name)
 
+    # ── Quick Cancel interceptor (command or button text) ────────────────
+    if text.lower() in ("/cancel", "cancel", "❌ cancel", "abort"):
+        context.user_data.pop("state", None)
+        context.user_data.pop("pending_link", None)
+        context.user_data.pop("pending_ch_link", None)
+        keyboard = rkb_admin() if is_admin(user.id) else rkb_user()
+        await message.reply_text(
+            f"{E_WARNING} <b>Action cancelled.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+        return
+
     # ── Admin state machine ────────────────────────────────────────────────
     state = context.user_data.get("state")
 
@@ -828,7 +880,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await _do_update_channel_link(message, context, cid)
             else:
                 context.user_data.pop("state", None)
-                await message.reply_text("⚠️ No channel to link. Add a channel first.", reply_markup=rkb_admin())
+                await message.reply_text(f"{E_WARNING} <b>No channel to link.</b> Add a channel first.", parse_mode=ParseMode.HTML, reply_markup=rkb_admin())
             return
 
     # ── Admin cookie document upload ───────────────────────────────────────
@@ -836,7 +888,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         doc = message.document
         fname = (doc.file_name or "").lower()
         if fname.endswith(".txt") or fname.endswith(".json"):
-            status_up = await message.reply_text("📥 <b>Receiving cookie file...</b>", parse_mode=ParseMode.HTML)
+            status_up = await message.reply_text(f"{E_RING_LOADER} <b>Receiving cookie file...</b>", parse_mode=ParseMode.HTML)
             try:
                 tg_file = await context.bot.get_file(doc.file_id)
                 target_path = Path("cookies.txt")
@@ -846,7 +898,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     ok = convert_json_cookies_to_netscape(temp_json, target_path)
                     temp_json.unlink(missing_ok=True)
                     if not ok:
-                        await status_up.edit_text("❌ Failed to parse JSON cookies format. Please check the file.")
+                        await status_up.edit_text(f"{E_WARNING} <b>Failed to parse JSON cookies format.</b> Please check the file.", parse_mode=ParseMode.HTML)
                         return
                 else:
                     await tg_file.download_to_drive(custom_path=target_path)
@@ -870,10 +922,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 await message.reply_text(
                     f"{E_CONFETTI} <b>Cookies Updated Successfully!</b>\n\n"
-                    f"✅ Saved fresh <code>cookies.txt</code>\n"
-                    f"☁️ Backed up to Neon PostgreSQL\n"
-                    f"🟢 Maintenance mode turned <b>OFF</b>\n"
-                    f"🔕 Cookie reminders stopped\n\n"
+                    f"{E_CHECK_MARK} Saved fresh <code>cookies.txt</code>\n"
+                    f"{E_DIAMOND} Backed up to Neon PostgreSQL\n"
+                    f"{E_CHECK_MARK} Maintenance mode turned <b>OFF</b>\n"
+                    f"{E_SPARKLES} Cookie reminders stopped\n\n"
                     f"{E_LIGHTNING} Your bot is ready to download reels!",
                     parse_mode=ParseMode.HTML,
                     reply_markup=rkb_admin(),
@@ -881,7 +933,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             except Exception as e:
                 logger.exception("Failed to process uploaded cookie file")
-                await status_up.edit_text(f"❌ Error saving cookies: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
+                await status_up.edit_text(f"{E_WARNING} <b>Error saving cookies:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
                 return
 
     # ── Reply Keyboard Button Presses ─────────────────────────────────────
@@ -940,6 +992,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _waiting_count += 1
     q_pos = _waiting_count
 
+    # Send premium pulsing heart emoji while downloading
+    heart_msg = None
+    try:
+        heart_msg = await message.reply_text(
+            f"{E_HEART_RED}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
     if _semaphore and _semaphore._value == 0:
         status_msg = await message.reply_text(
             f"{E_RING_LOADER} <b>Queued</b> — you're #{q_pos} in line.\n"
@@ -973,6 +1035,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # ── Handle failure ─────────────────────────────────────────────
             if not result["success"]:
+                if heart_msg:
+                    try:
+                        await heart_msg.delete()
+                    except Exception:
+                        pass
                 log_download(user.id, text, False)
                 err_type = result.get("error_type", "generic")
 
@@ -985,10 +1052,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         context.bot,
                         f"{E_WARNING} <b>Cookie Error — Maintenance ON</b>\n\n"
                         f"👤 User: {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                        f"🔗 <code>{html.escape(text[:100])}</code>\n"
-                        f"🕐 {now_str()}\n\n"
+                        f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
+                        f"{E_CLOCK_TIME} {now_str()}\n\n"
                         f"<pre>{html.escape(result.get('raw_error', '')[:400])}</pre>\n\n"
-                        "⚠️ Maintenance auto-enabled. Please send fresh cookies.txt!",
+                        f"{E_WARNING} <b>Maintenance auto-enabled. Please send fresh cookies.txt!</b>",
                     )
                     await status_msg.edit_text(
                         f"{E_ARC_REACTOR} <b>Bot is entering maintenance mode.</b>\n\nPlease try again in a little while.",
@@ -999,8 +1066,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         context.bot,
                         f"{E_WARNING} <b>Download Failed</b>\n\n"
                         f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                        f"🔗 <code>{html.escape(text[:100])}</code>\n"
-                        f"🕐 {now_str()}\n"
+                        f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
+                        f"{E_CLOCK_TIME} {now_str()}\n"
                         f"Type: <code>{err_type}</code>\n\n"
                         f"<pre>{html.escape(result.get('raw_error', result.get('error', ''))[:400])}</pre>",
                     )
@@ -1107,19 +1174,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 log_download(user.id, text, True)
                 logger.info("DL done  | user=%s", user.id)
 
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
+                # Delete temporary download messages (heart emoji & progress status)
+                for m in (heart_msg, status_msg):
+                    if m:
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
 
             except Exception as exc:
+                if heart_msg:
+                    try:
+                        await heart_msg.delete()
+                    except Exception:
+                        pass
                 log_download(user.id, text, False)
                 logger.exception("Send media failed")
                 await alert_admin(
                     context.bot,
                     f"{E_WARNING} <b>Send Failed</b>\n\n"
                     f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                    f"🕐 {now_str()}\n"
+                    f"{E_CLOCK_TIME} {now_str()}\n"
                     f"<pre>{html.escape(str(exc)[:400])}</pre>",
                 )
                 await status_msg.edit_text(
@@ -1134,16 +1209,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 cleanup_session(main_path)
 
     except Exception as exc:
+        if 'heart_msg' in locals() and heart_msg:
+            try:
+                await heart_msg.delete()
+            except Exception:
+                pass
         logger.exception("Unexpected error in handle_message")
         await alert_admin(
             context.bot,
             f"{E_WARNING} <b>Unexpected Error</b>\n\n"
             f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-            f"🕐 {now_str()}\n"
+            f"{E_CLOCK_TIME} {now_str()}\n"
             f"<pre>{html.escape(str(exc)[:400])}</pre>",
         )
         try:
-            await status_msg.edit_text("😕 Something went wrong. Please try again.")
+            await status_msg.edit_text(f"{E_BROKEN_HEART} <b>Something went wrong. Please try again.</b>", parse_mode=ParseMode.HTML)
         except Exception:
             pass
 
@@ -1178,28 +1258,9 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
         )
         return
 
-    if text == BTN_ABOUT:
-        channels = get_all_channels()
-        await message.reply_text(
-            f"{E_ARC_REACTOR} <b>About InstaBot</b>\n\n"
-            f"A fast, clean Instagram downloader bot.\n\n"
-            f"{E_LIGHTNING} <b>Tech stack:</b>\n"
-            f"• <code>yt-dlp</code> — download engine\n"
-            f"• <code>ffmpeg</code> — metadata stripper\n"
-            f"• <code>python-telegram-bot</code> — bot framework\n"
-            f"• <code>PostgreSQL / Neon</code> — multi-channel & stats database\n\n"
-            f"{E_NEON_RINGS} Active Required Channels: <b>{len(channels)}</b>\n\n"
-            f"{E_BLACK_MASK} <b>Privacy:</b>\n"
-            f"All metadata is stripped before sending.\n"
-            f"Temp files are deleted immediately after.\n\n"
-            f"📬 Issues? Contact the admin.",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
     # ── Admin-only buttons ─────────────────────────────────────────────────
     if not is_admin(user.id):
-        await message.reply_text(f"{E_WARNING} Admin only.")
+        await message.reply_text(f"{E_WARNING} <b>Admin only.</b>", parse_mode=ParseMode.HTML)
         return
 
     if text == BTN_STATS:
@@ -1211,8 +1272,9 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             f"{E_RED_WOLF} <b>Broadcast</b>\n\n"
             f"Send the message to broadcast to all users.\n"
             f"Supports text, photos, videos — anything.\n\n"
-            f"Send /cancel to abort.",
+            f"Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
 
     elif text.startswith("🔧 Maintenance:"):
@@ -1220,9 +1282,9 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
         set_setting("maintenance_mode", new_val)
         if new_val == "0":
             stop_cookie_reminder(context.job_queue)
-        label = "🟢 ON" if new_val == "1" else "⚫ OFF"
+        label = f"{E_CHECK_MARK} ON" if new_val == "1" else f"{E_CROSS_MARK} OFF"
         await message.reply_text(
-            f"{E_RING_LOADER} Maintenance mode → <b>{label}</b>",
+            f"{E_ARC_REACTOR} Maintenance mode → <b>{label}</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=rkb_admin(),
         )
@@ -1253,6 +1315,7 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
     elif text == BTN_CLOSE_MENU:
         await message.reply_text(
             f"{E_WHITE_BUTTERFLY} Admin menu closed. You're back to normal user mode.",
+            parse_mode=ParseMode.HTML,
             reply_markup=rkb_user(),
         )
 
@@ -1261,7 +1324,10 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
 async def _do_broadcast(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("state", None)
     user_ids = get_all_user_ids()
-    progress = await message.reply_text(f"{E_RING_LOADER} Broadcasting to {len(user_ids):,} users...")
+    progress = await message.reply_text(
+        f"{E_RING_LOADER} <b>Broadcasting to {len(user_ids):,} users...</b>",
+        parse_mode=ParseMode.HTML,
+    )
 
     sent   = 0
     failed = 0
@@ -1279,9 +1345,9 @@ async def _do_broadcast(message, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await progress.edit_text(
         f"{E_SPARKLES} <b>Broadcast Complete</b>\n\n"
-        f"✅ Sent   : <code>{sent:,}</code>\n"
+        f"{E_CHECK_MARK} Sent   : <code>{sent:,}</code>\n"
         f"{E_WARNING} Failed : <code>{failed:,}</code> <i>(blocked/deleted)</i>\n"
-        f"🕐 {now_str()}",
+        f"{E_CLOCK_TIME} {now_str()}",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1331,12 +1397,13 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"{E_NEON_RINGS} <b>Private Invite Link Received!</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"Telegram Bot API needs the channel's <b>Chat ID</b> to verify member subscriptions.\n\n"
-                    f"👉 <b>Two easy ways to finish:</b>\n"
+                    f"{E_ARROW} <b>Two easy ways to finish:</b>\n"
                     f"1️⃣ <b>Forward any post</b> from that channel into this chat.\n"
                     f"2️⃣ Or send its <b>Chat ID</b> (e.g. <code>-1001234567890</code>).\n\n"
                     f"<i>I've saved your invite link and will attach it automatically!</i>\n"
-                    f"Send /cancel to abort.",
+                    f"Send /cancel to abort or tap below.",
                     parse_mode=ParseMode.HTML,
+                    reply_markup=kb_cancel(),
                 )
                 return
 
@@ -1348,8 +1415,9 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"• <b>Username</b> (e.g. <code>@mychannel</code>)\n"
             f"• <b>Link</b> (e.g. <code>https://t.me/mychannel</code> or <code>-100... https://t.me/+...</code>)\n"
             f"• Or <b>forward any post from your channel</b> here!\n\n"
-            f"Send /cancel to abort.",
+            f"Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
         return
 
@@ -1367,12 +1435,13 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{E_WARNING} <b>Could not find or access that channel!</b>\n\n"
             f"Target: <code>{html.escape(str(target))}</code>\n"
             f"Error: <code>{html.escape(str(exc))}</code>\n\n"
-            f"⚠️ <b>Please make sure:</b>\n"
+            f"{E_WARNING} <b>Please make sure:</b>\n"
             f"1. You have already added this bot to your channel!\n"
             f"2. The Chat ID or username is typed correctly.\n"
             f"3. Or forward any message directly from the channel into this chat.\n\n"
             f"Send /cancel to abort.",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
         return
 
@@ -1382,17 +1451,18 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         bot_member = await context.bot.get_chat_member(chat_id=chat.id, user_id=me.id)
         if bot_member.status not in ("administrator", "creator"):
             await status_msg.edit_text(
-                f"{E_WARNING} <b>Bot is NOT an Administrator in {html.escape(chat.title or '')}!</b> ⛔\n\n"
-                f"📺 Channel: <b>{html.escape(chat.title or '')}</b>\n"
-                f"🆔 Chat ID: <code>{chat.id}</code>\n"
-                f"🤖 Bot Role: <code>{bot_member.status}</code>\n\n"
-                f"⚠️ Telegram <b>requires</b> bots to be an Administrator to verify if users have joined.\n\n"
-                f"👉 <b>Steps to fix:</b>\n"
+                f"{E_WARNING} <b>Bot is NOT an Administrator in {html.escape(chat.title or '')}!</b>\n\n"
+                f"{E_TV_SCREEN} Channel: <b>{html.escape(chat.title or '')}</b>\n"
+                f"{E_PIN_LINK} Chat ID: <code>{chat.id}</code>\n"
+                f"{E_ARC_REACTOR} Bot Role: <code>{bot_member.status}</code>\n\n"
+                f"{E_WARNING} Telegram <b>requires</b> bots to be an Administrator to verify if users have joined.\n\n"
+                f"{E_ARROW} <b>Steps to fix:</b>\n"
                 f"1. Open channel <b>{html.escape(chat.title or '')}</b> in Telegram\n"
-                f"2. Tap Channel Title ➔ Edit ➔ Administrators\n"
+                f"2. Tap Channel Title ➜ Edit ➜ Administrators\n"
                 f"3. Add @{me.username} as an Admin\n"
                 f"4. Send the Chat ID <code>{chat.id}</code> or forward a message again here!",
                 parse_mode=ParseMode.HTML,
+                reply_markup=kb_cancel(),
             )
             return
     except Exception as exc:
@@ -1448,12 +1518,12 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if invite_link:
         await message.reply_text(
-            f"{E_CONFETTI} <b>Channel Added Successfully!</b> 🎉\n"
+            f"{E_CONFETTI} <b>Channel Added Successfully!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📺 <b>Channel:</b> {html.escape(title)}\n"
-            f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
-            f"🤖 <b>Bot Role:</b> Administrator ✅\n"
-            f"🔗 <b>Invite Link:</b> <a href=\"{invite_link}\">Click Here</a>\n\n"
+            f"{E_TV_SCREEN} <b>Channel:</b> {html.escape(title)}\n"
+            f"{E_PIN_LINK} <b>Chat ID:</b> <code>{chat.id}</code>\n"
+            f"{E_ARC_REACTOR} <b>Bot Role:</b> Administrator {E_CHECK_MARK}\n"
+            f"{E_PIN_LINK} <b>Invite Link:</b> <a href=\"{invite_link}\">Click Here</a>\n\n"
             f"{E_BLACK_MASK} Users will now be required to join this channel before downloading.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_channel_management(),
@@ -1462,13 +1532,14 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["state"] = f"awaiting_ch_link:{chat.id}"
         await message.reply_text(
             f"{E_CONFETTI} <b>Channel Added:</b> <b>{html.escape(title)}</b>\n"
-            f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
-            f"🤖 <b>Bot Role:</b> Administrator ✅\n\n"
+            f"{E_PIN_LINK} <b>Chat ID:</b> <code>{chat.id}</code>\n"
+            f"{E_ARC_REACTOR} <b>Bot Role:</b> Administrator {E_CHECK_MARK}\n\n"
             f"{E_WARNING} <b>Invite Link Needed for Private Channel</b>\n"
             f"The bot could not auto-generate an invite link.\n\n"
-            f"👉 <b>Please send the channel's invite link now</b> (e.g. <code>https://t.me/+...</code>):\n"
+            f"{E_ARROW} <b>Please send the channel's invite link now</b> (e.g. <code>https://t.me/+...</code>):\n"
             f"<i>(Or send /cancel to set it later)</i>",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
 
 
@@ -1478,7 +1549,7 @@ async def _do_update_channel_link(message, context: ContextTypes.DEFAULT_TYPE, c
 
     if text == "-":
         update_channel_link(chat_id, "")
-        await message.reply_text(f"{E_CONFETTI} Channel invite link cleared.", reply_markup=kb_channel_management())
+        await message.reply_text(f"{E_CONFETTI} Channel invite link cleared.", parse_mode=ParseMode.HTML, reply_markup=kb_channel_management())
         return
 
     if not (text.startswith("https://t.me/") or text.startswith("http://t.me/") or text.startswith("@")):
@@ -1495,11 +1566,11 @@ async def _do_update_channel_link(message, context: ContextTypes.DEFAULT_TYPE, c
     title = ch["title"] if ch else chat_id
 
     await message.reply_text(
-        f"{E_CONFETTI} <b>Invite Link Updated!</b> 🎉\n"
+        f"{E_CONFETTI} <b>Invite Link Updated!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📺 Channel: <b>{html.escape(title)}</b>\n"
-        f"🆔 Chat ID: <code>{chat_id}</code>\n"
-        f"🔗 Link: {html.escape(text)}\n\n"
+        f"{E_TV_SCREEN} Channel: <b>{html.escape(title)}</b>\n"
+        f"{E_PIN_LINK} Chat ID: <code>{chat_id}</code>\n"
+        f"{E_PIN_LINK} Link: {html.escape(text)}\n\n"
         f"The <b>Join</b> button is now updated for users!",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_channel_management(),
@@ -1536,8 +1607,9 @@ async def cmd_addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"2️⃣ <b>Username</b> (e.g. <code>@mychannel</code>)\n"
         f"3️⃣ <b>Link</b> (e.g. <code>https://t.me/channel</code> or <code>-100... https://t.me/+...</code>)\n"
         f"4️⃣ Or forward any post from your channel here!\n\n"
-        f"Send /cancel to abort.",
+        f"Send /cancel to abort or tap below.",
         parse_mode=ParseMode.HTML,
+        reply_markup=kb_cancel(),
     )
 
 
@@ -1563,7 +1635,10 @@ async def cmd_delchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     channels = get_all_channels()
     if not channels:
-        await update.message.reply_text(f"{E_WARNING} No required channels configured yet.")
+        await update.message.reply_text(
+            f"{E_WARNING} No required channels configured yet.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     await update.message.reply_text(
@@ -1579,7 +1654,10 @@ async def cmd_setlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     args = context.args
     channels = get_all_channels()
     if not channels:
-        await update.message.reply_text(f"{E_WARNING} No channels configured yet. Add one first with /addchannel.")
+        await update.message.reply_text(
+            f"{E_WARNING} No channels configured yet. Add one first with /addchannel.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if len(args) >= 2:
@@ -1599,8 +1677,9 @@ async def cmd_setlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"{E_NEON_RINGS} <b>Set Invite Link for {html.escape(channels[0]['title'])}</b>\n\n"
             f"Send the invite link (e.g. <code>https://t.me/+...</code> or <code>https://t.me/channel</code>):\n"
             f"Send <code>-</code> to clear.\n"
-            f"Send /cancel to abort.",
+            f"Send /cancel to abort or tap below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=kb_cancel(),
         )
         return
 
@@ -1618,7 +1697,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         await alert_admin(
             context.bot,
             f"{E_WARNING} <b>Unhandled Error</b>\n\n"
-            f"🕐 {now_str()}\n"
+            f"{E_CLOCK_TIME} {now_str()}\n"
             f"<pre>{html.escape(str(context.error)[:400])}</pre>",
         )
     except Exception:
