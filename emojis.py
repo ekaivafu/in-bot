@@ -35,17 +35,17 @@ E_SKULL           = pe("5253539825360843975", "💀")  # Skull / Ghost Style
 E_BABY_NEON       = pe("6226493198013830325", "🍼")  # Baby Neon Text
 E_DARK_CAT        = pe("6057466460886799210", "😼")  # Dark Cat Face
 
-# ── Extended Premium Set ───────────────────────────────────────────────────────
-E_HEART_RED       = pe("5352727529511723136", "💖")  # Premium Pulsing Glow Heart
-E_HEART_FIRE      = pe("5352918496642604333", "❤️‍🔥")  # Neon Heart on Fire
-E_CHECK_MARK      = pe("5467471900139523277", "✅")  # Verified Neon Check
-E_CROSS_MARK      = pe("5465665476971408899", "❌")  # Red Neon Cross
-E_FIRE_FLAME      = pe("5424759902641790479", "🔥")  # Hot Fire Flame
-E_ROCKET          = pe("5449767858978368817", "🚀")  # Speed Turbo Rocket
-E_DIAMOND         = pe("5451646226954917654", "💎")  # Diamond Gem
-E_CHART_BAR       = pe("5471960249764516597", "📊")  # Analytics Chart
-E_SHIELD          = pe("5472164874886780364", "🛡️")  # Cyber Shield
-E_STAR_GLOW       = pe("5449749176885653421", "⭐")  # Golden Star Glow
-E_CLOCK_TIME      = pe("5447410652756784577", "🕐")  # Neon Clock / Timer
-E_PIN_LINK        = pe("6285315214673975495", "🔗")  # Link Pin
-E_TV_SCREEN       = pe("5971837723676249096", "📺")  # TV Screen Channel
+# ── Extended Set ─────────────────────────────────────────────────────────
+E_HEART_RED       = pe("5352727529511723136", "💖")  # Premium Pulsing Glow Heart (VERIFIED)
+E_HEART_FIRE      = pe("5352918496642604333", "❤️‍🔥")  # Neon Heart on Fire (VERIFIED)
+E_CHECK_MARK      = "✅"
+E_CROSS_MARK      = "❌"
+E_FIRE_FLAME      = "🔥"
+E_ROCKET          = "🚀"
+E_DIAMOND         = "💎"
+E_CHART_BAR       = "📊"
+E_SHIELD          = "🛡️"
+E_STAR_GLOW       = "⭐"
+E_CLOCK_TIME      = "🕐"
+E_PIN_LINK        = pe("6285315214673975495", "🔗")  # Link Pin (VERIFIED)
+E_TV_SCREEN       = pe("5971837723676249096", "📺")  # TV Screen Channel (VERIFIED)

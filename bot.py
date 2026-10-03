@@ -1072,20 +1072,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             await context.bot.send_chat_action(q.message.chat_id, ChatAction.UPLOAD_VOICE)
-            with open(audio_path, "rb") as af:
-                sent_audio = await context.bot.send_audio(
-                    chat_id=q.message.chat_id,
-                    audio=af,
-                    title=f"Audio - {shortcode}" if shortcode else "Instagram Audio",
-                    performer=f"@{bot_user}",
-                    caption=audio_caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_to_message_id=q.message.message_id,
-                    write_timeout=180,
-                    read_timeout=120,
-                )
+            sent_audio = None
+            try:
+                with open(audio_path, "rb") as af:
+                    sent_audio = await context.bot.send_audio(
+                        chat_id=q.message.chat_id,
+                        audio=af,
+                        title=f"Audio - {shortcode}" if shortcode else "Instagram Audio",
+                        performer=f"@{bot_user}",
+                        caption=audio_caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=q.message.message_id,
+                        write_timeout=180,
+                        read_timeout=120,
+                    )
+            except TelegramError as te:
+                logger.warning("send_audio with HTML failed (%s), retrying plain text...", te)
+                clean_audio_caption = re.sub(r"<[^>]+>", "", audio_caption)
+                with open(audio_path, "rb") as af:
+                    sent_audio = await context.bot.send_audio(
+                        chat_id=q.message.chat_id,
+                        audio=af,
+                        title=f"Audio - {shortcode}" if shortcode else "Instagram Audio",
+                        performer=f"@{bot_user}",
+                        caption=clean_audio_caption,
+                        reply_to_message_id=q.message.message_id,
+                        write_timeout=180,
+                        read_timeout=120,
+                    )
 
-            if shortcode and sent_audio.audio:
+            if shortcode and sent_audio and sent_audio.audio:
                 update_cached_audio(shortcode, sent_audio.audio.file_id)
 
             try:
