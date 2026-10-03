@@ -13,8 +13,10 @@ Features:
 """
 
 import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 import os
+import threading
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -1635,6 +1637,36 @@ async def post_init(application: Application) -> None:
         logger.info("Resumed cookie reminder from previous session")
 
 
+# ── Health Check Server (Render Web Service Port Binding) ──────────────────────
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK - InstaLoader Bot is running")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Silence access logs so console output stays clean
+        pass
+
+
+def start_health_server() -> None:
+    """Runs a minimal HTTP server so Render Web Service port scan succeeds immediately."""
+    port_env = os.environ.get("PORT", "8080")
+    try:
+        port = int(port_env)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info("Health check server bound to 0.0.0.0:%d (Render port scan ready)", port)
+        server.serve_forever()
+    except Exception as exc:
+        logger.warning("Could not bind health check server on port %s: %s", port_env, exc)
+
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def main() -> None:
     # Ensure an asyncio event loop exists in the main thread (fixes Python 3.12+ / 3.14 on Render)
@@ -1645,6 +1677,10 @@ def main() -> None:
 
     init_db()
     logger.info("Starting InstaLoader Bot…")
+
+    # Start healthcheck HTTP server in background thread for Render Web Service port check
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
 
     app = (
         Application.builder()
