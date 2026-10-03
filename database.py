@@ -454,6 +454,7 @@ def get_stats() -> dict:
 
 # ── Settings (Instant In-Memory Cache) ──────────────────────────────────────────
 def get_setting(key: str, default: str = "") -> str:
+    global _settings_cache
     with _cache_lock:
         if key in _settings_cache:
             return _settings_cache[key]
@@ -471,6 +472,7 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str) -> None:
+    global _settings_cache
     with _cache_lock:
         _settings_cache[key] = str(value)
     if USE_POSTGRES:
@@ -538,6 +540,7 @@ def remove_channel(chat_id: str) -> bool:
 
 
 def get_all_channels() -> list[dict]:
+    global _channels_cache
     with _cache_lock:
         if _channels_cache is not None:
             return list(_channels_cache)
@@ -563,6 +566,7 @@ def get_all_channels() -> list[dict]:
 
 
 def get_channel_count() -> int:
+    global _channels_cache
     with _cache_lock:
         if _channels_cache is not None:
             return len(_channels_cache)
