@@ -1566,6 +1566,12 @@ async def post_init(application: Application) -> None:
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
 def main() -> None:
+    # Ensure an asyncio event loop exists in the main thread (fixes Python 3.12+ / 3.14 on Render)
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     init_db()
     logger.info("Starting InstaLoader Bot…")
 
