@@ -1403,19 +1403,36 @@ async def _do_add_channel(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # 5. Determine invite link
+    # 5. Auto-fetch invite link — try every method before asking admin
     invite_link = custom_link or (pending_link if pending_link else "")
     if not invite_link:
         if chat.username:
+            # Public channel — username link always works
             invite_link = f"https://t.me/{chat.username}"
-        elif getattr(chat, "invite_link", None):
-            invite_link = chat.invite_link
         else:
-            try:
-                created = await context.bot.create_chat_invite_link(chat.id, name="InstaBot")
-                invite_link = created.invite_link
-            except Exception:
-                invite_link = ""
+            # Private channel — try 3 ways to get the link automatically
+            # Method A: link already on the chat object (returned by get_chat)
+            existing = getattr(chat, "invite_link", None)
+            if existing:
+                invite_link = existing
+
+            # Method B: export the primary invite link (requires "Invite Users" perm)
+            if not invite_link:
+                try:
+                    invite_link = await context.bot.export_chat_invite_link(chat.id)
+                    logger.info("Got primary invite link via export for %s", chat.id)
+                except Exception as exc:
+                    logger.warning("export_chat_invite_link failed for %s: %s", chat.id, exc)
+
+            # Method C: create a new invite link
+            if not invite_link:
+                try:
+                    created = await context.bot.create_chat_invite_link(chat.id, name="InstaBot")
+                    invite_link = created.invite_link
+                    logger.info("Created new invite link for %s", chat.id)
+                except Exception as exc:
+                    logger.warning("create_chat_invite_link failed for %s: %s", chat.id, exc)
+                    invite_link = ""
 
     # 6. Save channel to DB
     title = chat.title or (f"@{chat.username}" if chat.username else str(chat.id))
