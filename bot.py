@@ -397,14 +397,22 @@ def kb_force_sub(unjoined_channels: list[dict]) -> InlineKeyboardMarkup:
     for i, ch in enumerate(unjoined_channels, 1):
         title = ch.get("title", f"Channel {i}")
         link = ch.get("invite_link", "").strip()
+
+        # If no invite_link stored, try to build one from chat_id
         if not link:
-            cid = ch.get("chat_id", "")
+            cid = str(ch.get("chat_id", "")).strip()
             if cid.startswith("@"):
+                # Public channel username
                 link = f"https://t.me/{cid.lstrip('@')}"
-            else:
-                link = "https://t.me"
-        btn_text = f"📢 Join {title}" if len(title) <= 24 else f"📢 Join Channel {i}"
-        buttons.append([InlineKeyboardButton(btn_text, url=link)])
+            # Numeric chat_id (private channel) — no link available, skip button
+            # Admin must set a link with /setlink or via Channels > Set Link
+
+        if link:
+            btn_text = f"📢 Join {title}" if len(title) <= 24 else f"📢 Join Channel {i}"
+            buttons.append([InlineKeyboardButton(btn_text, url=link)])
+        else:
+            # Show a disabled-style notice so the user knows a channel exists
+            buttons.append([InlineKeyboardButton(f"⚠️ {title[:22]} (link missing)", callback_data="no_link_notice")])
 
     buttons.append([InlineKeyboardButton("✅ I've Joined All — Continue", callback_data="check_joined")])
     return InlineKeyboardMarkup(buttons)
@@ -584,6 +592,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await q.answer()
 
     # ── Admin callbacks (guard every one) ─────────────────────────────────
+    if data == "no_link_notice":
+        await q.answer(
+            "⚠️ This channel's invite link hasn't been set yet.\n"
+            "Please ask the admin to set it, or join manually.",
+            show_alert=True,
+        )
+        return
+
     if data.startswith("adm_") and not is_admin(uid):
         await q.answer("⛔ Admin only.", show_alert=True)
         return

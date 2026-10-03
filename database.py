@@ -16,6 +16,7 @@ import os
 import sqlite3
 import threading
 import logging
+import time
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -35,6 +36,14 @@ USE_POSTGRES = bool(DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgr
 DB_PATH = Path("bot_data.db")
 _sqlite_lock = threading.Lock()
 
+# ── High Performance In-Memory Caches ──────────────────────────────────────────
+# Settings and channels rarely change. Caching them eliminates multiple 300-800ms
+# round trips to Neon PostgreSQL on every single user message and /start command.
+_cache_lock = threading.Lock()
+_settings_cache: dict[str, str] = {}
+_channels_cache: list[dict] | None = None
+_user_seen_cache: dict[int, float] = {}
+
 # ── PostgreSQL Setup ───────────────────────────────────────────────────────────
 _pg_pool = None
 _pg_lock = threading.Lock()
@@ -43,8 +52,15 @@ if USE_POSTGRES:
     try:
         from psycopg2.pool import ThreadedConnectionPool
         import psycopg2
-        _pg_pool = ThreadedConnectionPool(1, 10, dsn=DATABASE_URL)
-        logger.info("Connected to PostgreSQL / Neon Database pool")
+        _pg_pool = ThreadedConnectionPool(
+            1, 10,
+            dsn=DATABASE_URL,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
+        logger.info("Connected to PostgreSQL / Neon Database pool (keepalives enabled)")
     except Exception as exc:
         logger.warning("Failed to initialize PostgreSQL pool: %s. Falling back to SQLite.", exc)
         USE_POSTGRES = False
@@ -66,7 +82,14 @@ def get_db_cursor():
                 try:
                     import psycopg2
                     from psycopg2.pool import ThreadedConnectionPool
-                    _pg_pool = ThreadedConnectionPool(1, 10, dsn=DATABASE_URL)
+                    _pg_pool = ThreadedConnectionPool(
+                        1, 10,
+                        dsn=DATABASE_URL,
+                        keepalives=1,
+                        keepalives_idle=30,
+                        keepalives_interval=10,
+                        keepalives_count=5,
+                    )
                     conn = _pg_pool.getconn()
                 except Exception as exc:
                     logger.error("Failed to acquire PostgreSQL connection: %s", exc)
@@ -76,10 +99,22 @@ def get_db_cursor():
         try:
             import psycopg2
             if conn.closed != 0:
-                conn = psycopg2.connect(DATABASE_URL)
+                conn = psycopg2.connect(
+                    DATABASE_URL,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
         except Exception:
             import psycopg2
-            conn = psycopg2.connect(DATABASE_URL)
+            conn = psycopg2.connect(
+                DATABASE_URL,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
 
         try:
             with conn.cursor() as cur:
@@ -231,7 +266,8 @@ def init_db() -> None:
             except Exception as e:
                 logger.warning("Failed to restore cookies: %s", e)
 
-        logger.info("Database initialized (Neon PostgreSQL mode)")
+            _load_caches(cur)
+        logger.info("Database initialized (Neon PostgreSQL mode with in-memory caching)")
     else:
         with get_db_cursor() as cur:
             cur.executescript("""
@@ -263,36 +299,96 @@ def init_db() -> None:
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 );
             """)
-        logger.info("Database initialized (SQLite mode)")
+            _load_caches(cur)
+        logger.info("Database initialized (SQLite mode with in-memory caching)")
+
+
+def _load_caches(cur) -> None:
+    """Pre-load settings and channels into memory for instant lookup."""
+    global _settings_cache, _channels_cache
+    with _cache_lock:
+        try:
+            cur.execute("SELECT key, value FROM settings")
+            for k, v in cur.fetchall():
+                _settings_cache[k] = v or ""
+        except Exception as e:
+            logger.warning("Failed to load settings cache: %s", e)
+
+        try:
+            cur.execute("SELECT id, chat_id, title, invite_link, created_at FROM channels ORDER BY id ASC")
+            _channels_cache = [
+                {
+                    "id": r[0],
+                    "chat_id": str(r[1]),
+                    "title": str(r[2]),
+                    "invite_link": str(r[3] or ""),
+                    "created_at": str(r[4]),
+                }
+                for r in cur.fetchall()
+            ]
+        except Exception as e:
+            logger.warning("Failed to load channels cache: %s", e)
+
+
+def _reload_channels_cache() -> None:
+    """Reload channel cache after an add, update, or remove operation."""
+    global _channels_cache
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT id, chat_id, title, invite_link, created_at FROM channels ORDER BY id ASC")
+            rows = cur.fetchall()
+        with _cache_lock:
+            _channels_cache = [
+                {
+                    "id": r[0],
+                    "chat_id": str(r[1]),
+                    "title": str(r[2]),
+                    "invite_link": str(r[3] or ""),
+                    "created_at": str(r[4]),
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("Failed to reload channels cache: %s", exc)
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
 def upsert_user(user_id: int, username: Optional[str], first_name: str) -> None:
-    if USE_POSTGRES:
-        with get_db_cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (user_id, username, first_name, last_seen)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET
-                    username   = EXCLUDED.username,
-                    first_name = EXCLUDED.first_name,
-                    last_seen  = NOW()
-                """,
-                (user_id, username or "", first_name or ""),
-            )
-    else:
-        with get_db_cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (user_id, username, first_name)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    username   = excluded.username,
-                    first_name = excluded.first_name
-                """,
-                (user_id, username or "", first_name or ""),
-            )
+    now = time.time()
+    last = _user_seen_cache.get(user_id, 0)
+    # Throttle DB writes: only write once every 10 minutes per active user
+    if now - last < 600:
+        return
+    _user_seen_cache[user_id] = now
+
+    try:
+        if USE_POSTGRES:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, first_name, last_seen)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        username   = EXCLUDED.username,
+                        first_name = EXCLUDED.first_name,
+                        last_seen  = NOW()
+                    """,
+                    (user_id, username or "", first_name or ""),
+                )
+        else:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, first_name)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        username   = excluded.username,
+                        first_name = excluded.first_name
+                    """,
+                    (user_id, username or "", first_name or ""),
+                )
+    except Exception as exc:
+        logger.warning("upsert_user failed for %s: %s", user_id, exc)
 
 
 def get_all_user_ids() -> list[int]:
@@ -356,16 +452,27 @@ def get_stats() -> dict:
     }
 
 
-# ── Settings ───────────────────────────────────────────────────────────────────
+# ── Settings (Instant In-Memory Cache) ──────────────────────────────────────────
 def get_setting(key: str, default: str = "") -> str:
+    with _cache_lock:
+        if key in _settings_cache:
+            return _settings_cache[key]
     placeholder = "%s" if USE_POSTGRES else "?"
-    with get_db_cursor() as cur:
-        cur.execute(f"SELECT value FROM settings WHERE key={placeholder}", (key,))
-        row = cur.fetchone()
-    return row[0] if row else default
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT value FROM settings WHERE key={placeholder}", (key,))
+            row = cur.fetchone()
+        val = row[0] if row else default
+        with _cache_lock:
+            _settings_cache[key] = val
+        return val
+    except Exception:
+        return default
 
 
 def set_setting(key: str, value: str) -> None:
+    with _cache_lock:
+        _settings_cache[key] = str(value)
     if USE_POSTGRES:
         with get_db_cursor() as cur:
             cur.execute(
@@ -382,7 +489,7 @@ def set_setting(key: str, value: str) -> None:
             )
 
 
-# ── Channels (Multi-channel Force-Sub) ─────────────────────────────────────────
+# ── Channels (Instant In-Memory Cache) ─────────────────────────────────────────
 def add_channel(chat_id: str, title: str, invite_link: str = "") -> None:
     if USE_POSTGRES:
         with get_db_cursor() as cur:
@@ -408,6 +515,7 @@ def add_channel(chat_id: str, title: str, invite_link: str = "") -> None:
                 """,
                 (str(chat_id).strip(), title.strip(), (invite_link or "").strip()),
             )
+    _reload_channels_cache()
 
 
 def update_channel_link(chat_id: str, invite_link: str) -> None:
@@ -417,6 +525,7 @@ def update_channel_link(chat_id: str, invite_link: str) -> None:
             f"UPDATE channels SET invite_link={placeholder} WHERE chat_id={placeholder}",
             (invite_link.strip(), str(chat_id).strip()),
         )
+    _reload_channels_cache()
 
 
 def remove_channel(chat_id: str) -> bool:
@@ -424,32 +533,43 @@ def remove_channel(chat_id: str) -> bool:
     with get_db_cursor() as cur:
         cur.execute(f"DELETE FROM channels WHERE chat_id={placeholder}", (str(chat_id).strip(),))
         deleted = cur.rowcount > 0
+    _reload_channels_cache()
     return deleted
 
 
 def get_all_channels() -> list[dict]:
-    with get_db_cursor() as cur:
-        cur.execute("SELECT id, chat_id, title, invite_link, created_at FROM channels ORDER BY id ASC")
-        rows = cur.fetchall()
-    return [
-        {
-            "id": r[0],
-            "chat_id": str(r[1]),
-            "title": str(r[2]),
-            "invite_link": str(r[3] or ""),
-            "created_at": str(r[4]),
-        }
-        for r in rows
-    ]
+    with _cache_lock:
+        if _channels_cache is not None:
+            return list(_channels_cache)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT id, chat_id, title, invite_link, created_at FROM channels ORDER BY id ASC")
+            rows = cur.fetchall()
+        channels = [
+            {
+                "id": r[0],
+                "chat_id": str(r[1]),
+                "title": str(r[2]),
+                "invite_link": str(r[3] or ""),
+                "created_at": str(r[4]),
+            }
+            for r in rows
+        ]
+        with _cache_lock:
+            _channels_cache = list(channels)
+        return channels
+    except Exception:
+        return []
 
 
 def get_channel_count() -> int:
-    with get_db_cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM channels")
-        count = cur.fetchone()[0]
-    return int(count or 0)
+    with _cache_lock:
+        if _channels_cache is not None:
+            return len(_channels_cache)
+    return len(get_all_channels())
 
 
 def clear_all_channels() -> None:
     with get_db_cursor() as cur:
         cur.execute("DELETE FROM channels")
+    _reload_channels_cache()
