@@ -297,3 +297,69 @@ def cleanup_session(video_path: Path) -> None:
     """Delete the session work directory after the file has been sent."""
     if video_path and video_path.parent.exists():
         shutil.rmtree(video_path.parent, ignore_errors=True)
+
+
+def extract_shortcode(url: str) -> str | None:
+    """Extract Instagram shortcode from URL (reel/post/tv)."""
+    if not url:
+        return None
+    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url)
+    return match.group(1) if match else None
+
+
+def extract_audio_from_video(video_path: Path, output_audio_path: Path | None = None) -> Path | None:
+    """Extract audio stream from video file as MP3 via ffmpeg."""
+    if not video_path or not video_path.exists():
+        return None
+    if output_audio_path is None:
+        output_audio_path = video_path.parent / f"{video_path.stem}.mp3"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-q:a", "2",
+        str(output_audio_path),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=60)
+        if res.returncode == 0 and output_audio_path.exists() and output_audio_path.stat().st_size > 0:
+            return output_audio_path
+    except Exception as exc:
+        logger.warning("extract_audio_from_video failed: %s", exc)
+    return None
+
+
+def check_cookies_health() -> tuple[bool, str]:
+    """
+    Validates Instagram session cookies:
+    1. Checks if cookies.txt exists and is non-empty
+    2. Inspects sessionid presence and expiry timestamp
+    """
+    cookie_file = find_cookies_file()
+    if not cookie_file or not Path(cookie_file).is_file() or Path(cookie_file).stat().st_size == 0:
+        return False, "No active cookies.txt found on server"
+
+    try:
+        content = Path(cookie_file).read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        return False, f"Could not read cookies file: {exc}"
+
+    if "sessionid" not in content:
+        return False, "Cookies file does not contain an active Instagram 'sessionid'"
+
+    import time
+    now_ts = int(time.time())
+    for line in content.splitlines():
+        if "sessionid" in line:
+            parts = line.strip().split("\t")
+            if len(parts) >= 5:
+                try:
+                    exp = int(parts[4])
+                    if 0 < exp < now_ts:
+                        return False, f"Instagram sessionid expired on {time.ctime(exp)}"
+                except ValueError:
+                    pass
+
+    return True, "Cookies are valid"
+

@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 import os
 import threading
+import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -56,8 +57,20 @@ from database import (
     get_all_channels,
     get_channel_count,
     clear_all_channels,
+    get_cached_media,
+    set_cached_media,
+    update_cached_audio,
 )
-from downloader import cleanup_session, download_instagram, is_instagram_url, convert_json_cookies_to_netscape
+from downloader import (
+    cleanup_session,
+    download_instagram,
+    is_instagram_url,
+    convert_json_cookies_to_netscape,
+    extract_shortcode,
+    extract_audio_from_video,
+    check_cookies_health,
+    DOWNLOAD_DIR,
+)
 import html
 
 
@@ -258,6 +271,31 @@ async def cookie_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cookie_health_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Proactively checks Instagram cookie validity every 30 minutes."""
+    if get_setting("cookie_alert_active", "0") == "1":
+        return
+
+    is_healthy, reason = check_cookies_health()
+    if not is_healthy:
+        logger.warning("Cookie health check failed: %s", reason)
+        set_setting("maintenance_mode", "1")
+        set_setting("cookie_alert_active", "1")
+        start_cookie_reminder(context.job_queue)
+        await alert_admin(
+            context.bot,
+            f"{E_WARNING} <b>Cookie Health Alert — Issue Detected!</b>\n\n"
+            f"The 30-minute health monitor detected a cookie issue:\n"
+            f"<b>Reason:</b> <code>{html.escape(reason)}</code>\n\n"
+            f"{E_ARC_REACTOR} <b>Maintenance mode auto-enabled.</b>\n"
+            f"{E_CLOCK_TIME} Admin reminders will be sent every 10 minutes.\n\n"
+            f"{E_ARROW} <b>Fastest fix:</b>\n"
+            f"Send your fresh <code>cookies.txt</code> or <code>.json</code> directly to this chat!",
+        )
+    else:
+        logger.info("30-min cookie health check passed: %s", reason)
+
+
 def start_cookie_reminder(job_queue) -> None:
     if not job_queue.get_jobs_by_name("cookie_reminder"):
         job_queue.run_repeating(
@@ -331,6 +369,13 @@ def rkb_admin() -> ReplyKeyboardMarkup:
 
 
 # ── Keyboards (inline) ─────────────────────────────────────────────────────────
+def kb_video_actions(shortcode: str) -> InlineKeyboardMarkup:
+    """Inline button below delivered video for 1-tap audio extraction."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎵 Extract Audio", callback_data=f"audio:{shortcode}")]
+    ])
+
+
 def kb_admin_panel() -> InlineKeyboardMarkup:
     maint       = "🟢 ON" if is_maintenance() else "⚫ OFF"
     cookie_flag = get_setting("cookie_alert_active", "0") == "1"
@@ -849,6 +894,94 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=kb_back_admin(),
         )
 
+    # ── Audio Extraction Callback ─────────────────────────────────────────
+    elif data.startswith("audio:"):
+        shortcode = data.split(":", 1)[1].strip()
+        cached = get_cached_media(shortcode) if shortcode else None
+        bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
+        audio_caption = (
+            f"{E_SPARKLES} <b>Audio Extracted</b> {E_LIGHTNING}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
+        )
+
+        # 1. Instant Cache Hit: send cached audio_file_id in < 0.2s!
+        if cached and cached.get("audio_file_id"):
+            await q.answer("🎵 Sending cached audio...")
+            await context.bot.send_chat_action(q.message.chat_id, ChatAction.UPLOAD_VOICE)
+            await context.bot.send_audio(
+                chat_id=q.message.chat_id,
+                audio=cached["audio_file_id"],
+                title=f"Audio - {shortcode}",
+                performer=f"@{bot_user}",
+                caption=audio_caption,
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=q.message.message_id,
+            )
+            return
+
+        # 2. Cache Miss: Extract from message video
+        if not q.message.video:
+            await q.answer("❌ Video media unavailable for extraction.", show_alert=True)
+            return
+
+        await q.answer("⏳ Extracting audio MP3...")
+        status_msg = await q.message.reply_text(
+            f"{E_RING_LOADER} <b>Extracting audio stream...</b>",
+            parse_mode=ParseMode.HTML,
+        )
+
+        session_id = uuid.uuid4().hex[:8]
+        work_dir = DOWNLOAD_DIR / f"audio_{session_id}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        video_temp_path = work_dir / "source_video.mp4"
+
+        try:
+            v_file = await context.bot.get_file(q.message.video.file_id)
+            await v_file.download_to_drive(video_temp_path)
+
+            audio_path = await asyncio.to_thread(extract_audio_from_video, video_temp_path)
+            if not audio_path or not audio_path.exists():
+                await status_msg.edit_text(
+                    f"{E_BROKEN_HEART} <b>Failed to extract audio from video.</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            await context.bot.send_chat_action(q.message.chat_id, ChatAction.UPLOAD_VOICE)
+            with open(audio_path, "rb") as af:
+                sent_audio = await context.bot.send_audio(
+                    chat_id=q.message.chat_id,
+                    audio=af,
+                    title=f"Audio - {shortcode}" if shortcode else "Instagram Audio",
+                    performer=f"@{bot_user}",
+                    caption=audio_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=q.message.message_id,
+                    write_timeout=180,
+                    read_timeout=120,
+                )
+
+            if shortcode and sent_audio.audio:
+                update_cached_audio(shortcode, sent_audio.audio.file_id)
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.exception("Error extracting audio in callback")
+            try:
+                await status_msg.edit_text(
+                    f"{E_BROKEN_HEART} <b>Could not extract audio.</b> Please try again.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        finally:
+            cleanup_session(video_temp_path)
+        return
+
     # ── User callback: multi-channel join check ───────────────────────────
     elif data == "check_joined":
         unjoined = await get_unjoined_channels(context.bot, uid)
@@ -1040,6 +1173,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    # ── Instant Cache Check (< 0.5s response) ─────────────────────────────
+    shortcode = extract_shortcode(text)
+    if shortcode:
+        cached = get_cached_media(shortcode)
+        if cached and cached.get("video_file_id"):
+            bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
+            video_cap = (
+                f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
+            )
+            try:
+                await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
+                await context.bot.send_video(
+                    chat_id=message.chat_id,
+                    video=cached["video_file_id"],
+                    caption=video_cap,
+                    parse_mode=ParseMode.HTML,
+                    supports_streaming=True,
+                    reply_markup=kb_video_actions(shortcode),
+                )
+                # Monospace Caption (clean, 1-tap copy, no promo below caption)
+                if cached.get("caption"):
+                    c_text = cached["caption"]
+                    chunks = [c_text[i : i + 3900] for i in range(0, len(c_text), 3900)]
+                    header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
+                    for chunk in chunks:
+                        await message.reply_text(
+                            f"{header}<code>{html.escape(chunk)}</code>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        header = ""
+                log_download(user.id, text, True)
+                logger.info("Instant cache hit | user=%s | shortcode=%s", user.id, shortcode)
+                return
+            except Exception as exc:
+                logger.warning("Cache send failed for %s, falling back to fresh download: %s", shortcode, exc)
+
     # ── Queue capacity check ───────────────────────────────────────────────
     if _waiting_count >= MAX_QUEUE:
         await message.reply_text(
@@ -1176,28 +1347,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 # ── Case A: Video / Reel ──────────────────────────────────
                 if result.get("is_video", True) and video_path:
+                    bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
+                    video_caption = (
+                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
+                    )
+                    sc = extract_shortcode(text) or ""
+                    v_kb = kb_video_actions(sc) if sc else None
+
                     with open(video_path, "rb") as vf:
                         await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
-                        await context.bot.send_video(
+                        sent_vid = await context.bot.send_video(
                             chat_id=message.chat_id,
                             video=vf,
-                            caption=f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                            caption=video_caption,
                             parse_mode=ParseMode.HTML,
                             supports_streaming=True,
+                            reply_markup=v_kb,
                             write_timeout=180,
                             read_timeout=120,
                             connect_timeout=30,
                         )
+                        if sc and sent_vid.video:
+                            set_cached_media(
+                                shortcode=sc,
+                                video_file_id=sent_vid.video.file_id,
+                                caption=caption_text,
+                            )
 
                 # ── Case B: Single Photo or Carousel ──────────────────────
                 elif image_paths:
+                    bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
+                    media_caption = (
+                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
+                    )
                     if len(image_paths) == 1:
                         with open(image_paths[0], "rb") as pf:
                             await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_PHOTO)
                             await context.bot.send_photo(
                                 chat_id=message.chat_id,
                                 photo=pf,
-                                caption=f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                                caption=media_caption,
                                 parse_mode=ParseMode.HTML,
                                 write_timeout=180,
                                 read_timeout=120,
@@ -1211,7 +1404,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             for idx, img_p in enumerate(image_paths[:10]):  # Telegram max 10 per album
                                 f = open(img_p, "rb")
                                 opened_files.append(f)
-                                cap = f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}" if idx == 0 else None
+                                cap = media_caption if idx == 0 else None
                                 pm = ParseMode.HTML if idx == 0 else None
                                 media_group.append(InputMediaPhoto(media=f, caption=cap, parse_mode=pm))
                             await context.bot.send_media_group(chat_id=message.chat_id, media=media_group)
@@ -1222,7 +1415,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 except Exception:
                                     pass
 
-                # ── Monospace Caption (1-Tap Copy) ────────────────────────
+                # ── Monospace Caption (1-Tap Copy - NO PROMOTION BELOW CAPTION) ──
                 if caption_text:
                     chunks = [caption_text[i : i + 3900] for i in range(0, len(caption_text), 3900)]
                     header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
@@ -1776,6 +1969,16 @@ async def post_init(application: Application) -> None:
     if get_setting("cookie_alert_active", "0") == "1":
         start_cookie_reminder(application.job_queue)
         logger.info("Resumed cookie reminder from previous session")
+
+    # Schedule 30-minute proactive cookie health check
+    if not application.job_queue.get_jobs_by_name("cookie_health_check"):
+        application.job_queue.run_repeating(
+            cookie_health_check_job,
+            interval=1800,  # 30 min
+            first=120,      # first check in 2 min
+            name="cookie_health_check",
+        )
+        logger.info("Registered 30-min cookie health check job")
 
 
 # ── Health Check Server (Render Web Service Port Binding) ──────────────────────

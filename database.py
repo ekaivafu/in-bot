@@ -260,6 +260,15 @@ def init_db() -> None:
                             invite_link TEXT DEFAULT '',
                             created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                         );
+
+                        CREATE TABLE IF NOT EXISTS media_cache (
+                            id            SERIAL PRIMARY KEY,
+                            shortcode     TEXT UNIQUE NOT NULL,
+                            video_file_id TEXT DEFAULT '',
+                            audio_file_id TEXT DEFAULT '',
+                            caption       TEXT DEFAULT '',
+                            created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
                     """)
 
                     # Check if migration needed
@@ -316,6 +325,15 @@ def init_db() -> None:
                     title       TEXT NOT NULL,
                     invite_link TEXT DEFAULT '',
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS media_cache (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT UNIQUE NOT NULL,
+                    video_file_id TEXT DEFAULT '',
+                    audio_file_id TEXT DEFAULT '',
+                    caption       TEXT DEFAULT '',
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
             """)
             _load_caches(cur)
@@ -596,3 +614,84 @@ def clear_all_channels() -> None:
     with get_db_cursor() as cur:
         cur.execute("DELETE FROM channels")
     _reload_channels_cache()
+
+
+# ── Media Cache (Instant Re-send & Audio Extraction) ───────────────────────────
+def get_cached_media(shortcode: str) -> dict | None:
+    """Retrieve cached Telegram file_ids and caption for an Instagram shortcode."""
+    if not shortcode:
+        return None
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"SELECT video_file_id, audio_file_id, caption FROM media_cache WHERE shortcode={placeholder}",
+                (str(shortcode).strip(),),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "video_file_id": str(row[0] or ""),
+                    "audio_file_id": str(row[1] or ""),
+                    "caption": str(row[2] or ""),
+                }
+    except Exception as exc:
+        logger.warning("get_cached_media error for %s: %s", shortcode, exc)
+    return None
+
+
+def set_cached_media(shortcode: str, video_file_id: str = "", audio_file_id: str = "", caption: str = "") -> None:
+    """Save or update cached Telegram file_ids and caption."""
+    if not shortcode:
+        return
+    sc = str(shortcode).strip()
+    vid = str(video_file_id or "").strip()
+    aud = str(audio_file_id or "").strip()
+    cap = str(caption or "").strip()
+    try:
+        if USE_POSTGRES:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO media_cache (shortcode, video_file_id, audio_file_id, caption)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (shortcode) DO UPDATE SET
+                        video_file_id = CASE WHEN EXCLUDED.video_file_id != '' THEN EXCLUDED.video_file_id ELSE media_cache.video_file_id END,
+                        audio_file_id = CASE WHEN EXCLUDED.audio_file_id != '' THEN EXCLUDED.audio_file_id ELSE media_cache.audio_file_id END,
+                        caption       = CASE WHEN EXCLUDED.caption != '' THEN EXCLUDED.caption ELSE media_cache.caption END
+                    """,
+                    (sc, vid, aud, cap),
+                )
+        else:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO media_cache (shortcode, video_file_id, audio_file_id, caption)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(shortcode) DO UPDATE SET
+                        video_file_id = CASE WHEN excluded.video_file_id != '' THEN excluded.video_file_id ELSE media_cache.video_file_id END,
+                        audio_file_id = CASE WHEN excluded.audio_file_id != '' THEN excluded.audio_file_id ELSE media_cache.audio_file_id END,
+                        caption       = CASE WHEN excluded.caption != '' THEN excluded.caption ELSE media_cache.caption END
+                    """,
+                    (sc, vid, aud, cap),
+                )
+    except Exception as exc:
+        logger.warning("set_cached_media error for %s: %s", shortcode, exc)
+
+
+def update_cached_audio(shortcode: str, audio_file_id: str) -> None:
+    """Update only the audio_file_id for an existing cached media item."""
+    if not shortcode or not audio_file_id:
+        return
+    sc = str(shortcode).strip()
+    aud = str(audio_file_id).strip()
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"UPDATE media_cache SET audio_file_id={placeholder} WHERE shortcode={placeholder}",
+                (aud, sc),
+            )
+    except Exception as exc:
+        logger.warning("update_cached_audio error for %s: %s", shortcode, exc)
+
