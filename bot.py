@@ -59,6 +59,14 @@ from database import (
 )
 from downloader import cleanup_session, download_instagram, is_instagram_url, convert_json_cookies_to_netscape
 import html
+
+
+def safe_html(text: any) -> str:
+    """Safely escape text for HTML parse mode, handling None gracefully."""
+    if text is None:
+        return ""
+    return html.escape(str(text))
+
 from emojis import (
     E_FLAME_BUTTERFLY,
     E_WHITE_BUTTERFLY,
@@ -209,15 +217,28 @@ async def check_channel_membership(bot, user_id: int, channel: str) -> bool:
 
 async def get_unjoined_channels(bot, user_id: int) -> list[dict]:
     """Check membership for all required channels. Returns list of unjoined channel dicts."""
-    channels = get_all_channels()
-    if not channels:
+    try:
+        channels = get_all_channels()
+        if not channels:
+            return []
+        unjoined = []
+        for ch in channels:
+            cid = ch.get("chat_id")
+            if not cid:
+                continue
+            try:
+                is_member = await asyncio.wait_for(
+                    check_channel_membership(bot, user_id, str(cid)),
+                    timeout=3.0,
+                )
+            except Exception:
+                is_member = False
+            if not is_member:
+                unjoined.append(ch)
+        return unjoined
+    except Exception as exc:
+        logger.warning("get_unjoined_channels failed: %s", exc)
         return []
-    unjoined = []
-    for ch in channels:
-        is_member = await check_channel_membership(bot, user_id, ch["chat_id"])
-        if not is_member:
-            unjoined.append(ch)
-    return unjoined
 
 
 # ── Job: Cookie Reminder ───────────────────────────────────────────────────────
@@ -470,59 +491,95 @@ def build_stats_text() -> str:
 
 # ── Command Handlers ───────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message or update.message
+    if not message:
+        return
+
     user = update.effective_user
-    upsert_user(user.id, user.username, user.first_name)
-
-    # 1. Admin greeting & controls
-    if is_admin(user.id):
-        channels = get_all_channels()
-        ch_count = len(channels)
-        missing_links = [html.escape(c["title"]) for c in channels if not c["invite_link"].strip()]
-        link_warn = ""
-        if missing_links:
-            link_warn = f"\n\n{E_WARNING} <i>Notice:</i> {len(missing_links)} channel(s) need an invite link: {', '.join(missing_links)}. Use /setlink or tap Channels below."
-
-        await update.message.reply_text(
-            f"{E_GOLDEN_MAZE} <b>Admin Control Panel</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Welcome back, <b>{html.escape(user.first_name)}</b>!\n"
-            f"• Maintenance: <b>{'ON' if is_maintenance() else 'OFF'}</b>\n"
-            f"• Required Channels: <b>{ch_count} Active</b>{link_warn}\n\n"
-            f"{E_ARROW} Select an option below or send /admin for inline controls.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=rkb_admin(),
-        )
+    if not user:
         return
 
-    # 2. Regular user: check membership across all required channels
-    unjoined = await get_unjoined_channels(context.bot, user.id)
-    if unjoined:
-        ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{html.escape(c.get('title', 'Channel'))}</b>" for c in unjoined])
-        await update.message.reply_text(
-            f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> {E_SPARKLES}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "To download Instagram <b>Reels, Posts & IGTV</b>, "
-            "you must first join our official channel(s):\n\n"
-            f"{ch_list_str}\n\n"
-            f"{E_ARROW} Tap <b>Join</b> for each channel below, then tap <b>I've Joined All</b> to unlock the bot:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_force_sub(unjoined),
-        )
-        return
+    try:
+        upsert_user(user.id, user.username, user.first_name)
+    except Exception as e:
+        logger.warning("upsert_user error in cmd_start: %s", e)
 
-    # 3. Regular user (all joined or no channel): send clean welcome
-    await update.message.reply_text(
-        f"{E_FLAME_BUTTERFLY} <b>Hey {html.escape(user.first_name)}! Welcome to InstaBot</b> {E_SPARKLES}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
-        f"{E_SPARKLES} <b>Features:</b>\n"
-        f"• Best available quality {E_LIGHTNING}\n"
-        f"• Clean metadata {E_BLACK_MASK} <i>(safe to repost)</i>\n"
-        f"• Monospace caption for 1-tap copy {E_DIAMOND}\n\n"
-        f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=rkb_user(),
-    )
+    name = safe_html(user.first_name or user.username or "Friend")
+
+    try:
+        # 1. Admin greeting & controls
+        if is_admin(user.id):
+            channels = get_all_channels()
+            ch_count = len(channels)
+            missing_links = [
+                safe_html(c.get("title") or c.get("chat_id"))
+                for c in channels
+                if not (c.get("invite_link") or "").strip()
+            ]
+            link_warn = ""
+            if missing_links:
+                link_warn = f"\n\n{E_WARNING} <i>Notice:</i> {len(missing_links)} channel(s) need an invite link: {', '.join(missing_links)}. Use /setlink or tap Channels below."
+
+            await message.reply_text(
+                f"{E_GOLDEN_MAZE} <b>Admin Control Panel</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Welcome back, <b>{name}</b>!\n"
+                f"• Maintenance: <b>{'ON' if is_maintenance() else 'OFF'}</b>\n"
+                f"• Required Channels: <b>{ch_count} Active</b>{link_warn}\n\n"
+                f"{E_ARROW} Select an option below or send /admin for inline controls.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=rkb_admin(),
+            )
+            return
+
+        # 2. Regular user: check membership across all required channels
+        unjoined = []
+        try:
+            unjoined = await asyncio.wait_for(get_unjoined_channels(context.bot, user.id), timeout=4.0)
+        except Exception:
+            unjoined = []
+
+        if unjoined:
+            ch_list_str = "\n".join([f"  {E_HEART_BORDER} <b>{safe_html(c.get('title') or c.get('chat_id'))}</b>" for c in unjoined])
+            await message.reply_text(
+                f"{E_FLAME_BUTTERFLY} <b>Hey {name}! Welcome to InstaBot</b> {E_SPARKLES}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "To download Instagram <b>Reels, Posts & IGTV</b>, "
+                "you must first join our official channel(s):\n\n"
+                f"{ch_list_str}\n\n"
+                f"{E_ARROW} Tap <b>Join</b> for each channel below, then tap <b>I've Joined All</b> to unlock the bot:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_force_sub(unjoined),
+            )
+            return
+
+        # 3. Regular user (all joined or no channel): send clean welcome
+        await message.reply_text(
+            f"{E_FLAME_BUTTERFLY} <b>Hey {name}! Welcome to InstaBot</b> {E_SPARKLES}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
+            f"{E_SPARKLES} <b>Features:</b>\n"
+            f"• Best available quality {E_LIGHTNING}\n"
+            f"• Clean metadata {E_BLACK_MASK} <i>(safe to repost)</i>\n"
+            f"• Monospace caption for 1-tap copy {E_DIAMOND}\n\n"
+            f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=rkb_user(),
+        )
+    except Exception as exc:
+        logger.exception("cmd_start encountered error: %s", exc)
+        # Guaranteed fallback so user is NEVER left without a response
+        try:
+            await message.reply_text(
+                f"{E_FLAME_BUTTERFLY} <b>Hey {name}! Welcome to InstaBot</b> {E_SPARKLES}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
+                f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=rkb_admin() if is_admin(user.id) else rkb_user(),
+            )
+        except Exception:
+            pass
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -857,6 +914,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
         )
+        return
+
+    # ── Quick Start interceptor ──────────────────────────────────────────
+    if text.lower() == "/start" or text.lower().startswith("/start") or text.lower() == "start":
+        await cmd_start(update, context)
         return
 
     # ── Admin state machine ────────────────────────────────────────────────
