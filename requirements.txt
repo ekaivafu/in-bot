@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]==21.6
+yt-dlp>=2026.8.19
+python-dotenv==1.0.1
+curl-cffi>=0.7.0
+psycopg2-binary>=2.9.9

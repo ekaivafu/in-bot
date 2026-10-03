@@ -1,0 +1,33 @@
+# Temp downloads folder
+downloads/
+
+# Environment secrets
+.env
+
+# Instagram session cookies — upload to Render as a Secret File instead
+cookies.txt
+*.json
+
+# Instagram session cache (generated after first login)
+ig_session/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+
+# SQLite database files
+*.db
+*.sqlite3
+bot_data.db
