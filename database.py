@@ -367,6 +367,15 @@ def _load_caches(cur) -> None:
             logger.warning("Failed to load channels cache: %s", e)
 
 
+_channel_change_callbacks: list = []
+
+
+def register_channel_change_callback(callback) -> None:
+    """Register a callback invoked when channels are added, removed, or updated."""
+    if callback not in _channel_change_callbacks:
+        _channel_change_callbacks.append(callback)
+
+
 def _reload_channels_cache() -> None:
     """Reload channel cache after an add, update, or remove operation."""
     global _channels_cache
@@ -385,6 +394,11 @@ def _reload_channels_cache() -> None:
                 }
                 for r in rows
             ]
+        for cb in _channel_change_callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
     except Exception as exc:
         logger.warning("Failed to reload channels cache: %s", exc)
 

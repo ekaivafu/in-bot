@@ -16,7 +16,9 @@ import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 import os
+import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from functools import wraps
@@ -60,6 +62,7 @@ from database import (
     get_cached_media,
     set_cached_media,
     update_cached_audio,
+    register_channel_change_callback,
 )
 from downloader import (
     cleanup_session,
@@ -208,6 +211,32 @@ async def alert_admin(bot, text: str) -> None:
             logger.error("alert_admin failed for %s: %s", aid, exc)
 
 
+# ── Channel Membership Cache (makes /start instant) ───────────────────────────
+_membership_cache: dict[int, tuple[float, bool]] = {}
+MEMBERSHIP_CACHE_TTL = 300  # 5 minutes
+
+
+def is_user_cached_member(user_id: int) -> bool:
+    entry = _membership_cache.get(user_id)
+    if entry:
+        ts, is_member = entry
+        if time.time() - ts < MEMBERSHIP_CACHE_TTL and is_member:
+            return True
+    return False
+
+
+def cache_user_membership(user_id: int, is_member: bool) -> None:
+    _membership_cache[user_id] = (time.time(), is_member)
+
+
+def clear_membership_cache() -> None:
+    _membership_cache.clear()
+    logger.info("Cleared user channel membership cache")
+
+
+register_channel_change_callback(clear_membership_cache)
+
+
 async def check_channel_membership(bot, user_id: int, channel: str) -> bool:
     """Check if user has joined the required channel."""
     if not channel:
@@ -229,25 +258,37 @@ async def check_channel_membership(bot, user_id: int, channel: str) -> bool:
 
 
 async def get_unjoined_channels(bot, user_id: int) -> list[dict]:
-    """Check membership for all required channels. Returns list of unjoined channel dicts."""
+    """Check membership for all required channels in parallel with in-memory caching."""
+    if is_user_cached_member(user_id):
+        return []
+
     try:
         channels = get_all_channels()
         if not channels:
+            cache_user_membership(user_id, True)
             return []
-        unjoined = []
-        for ch in channels:
+
+        async def _check_one(ch: dict) -> tuple[dict, bool]:
             cid = ch.get("chat_id")
             if not cid:
-                continue
+                return ch, True
             try:
-                is_member = await asyncio.wait_for(
-                    check_channel_membership(bot, user_id, str(cid)),
-                    timeout=3.0,
-                )
+                ok = await asyncio.wait_for(check_channel_membership(bot, user_id, str(cid)), timeout=2.0)
+                return ch, ok
             except Exception:
-                is_member = False
-            if not is_member:
-                unjoined.append(ch)
+                return ch, False
+
+        results = await asyncio.gather(*[_check_one(ch) for ch in channels], return_exceptions=True)
+        unjoined = []
+        for res in results:
+            if isinstance(res, tuple):
+                ch, ok = res
+                if not ok:
+                    unjoined.append(ch)
+
+        if not unjoined:
+            cache_user_membership(user_id, True)
+
         return unjoined
     except Exception as exc:
         logger.warning("get_unjoined_channels failed: %s", exc)
@@ -374,6 +415,84 @@ def kb_video_actions(shortcode: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎵 Extract Audio", callback_data=f"audio:{shortcode}")]
     ])
+
+
+def get_media_file_id(sent_msg) -> str:
+    """Extract file_id whether sent as video, document, or animation."""
+    if not sent_msg:
+        return ""
+    if getattr(sent_msg, "video", None):
+        return sent_msg.video.file_id
+    if getattr(sent_msg, "document", None):
+        return sent_msg.document.file_id
+    if getattr(sent_msg, "animation", None):
+        return sent_msg.animation.file_id
+    return ""
+
+
+async def _send_video_resilient(
+    bot,
+    chat_id: int,
+    video_path: Path,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """
+    Sends video with robust multi-tier fallback:
+    Tier 1: send_video with HTML parse_mode
+    Tier 2: send_video without parse_mode (if HTML parsing fails)
+    Tier 3: send_document fallback (Telegram NEVER rejects MP4 files up to 50MB as documents)
+    """
+    # Tier 1: send_video (HTML)
+    try:
+        with open(video_path, "rb") as vf:
+            sent = await bot.send_video(
+                chat_id=chat_id,
+                video=vf,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                supports_streaming=True,
+                reply_markup=reply_markup,
+                write_timeout=180,
+                read_timeout=120,
+                connect_timeout=30,
+            )
+            return sent
+    except TelegramError as e1:
+        logger.warning("Tier 1 send_video failed: %s. Trying Tier 2 (plain text)...", e1)
+
+    # Tier 2: send_video (plain text without HTML tags)
+    clean_caption = re.sub(r"<[^>]+>", "", caption)
+    try:
+        with open(video_path, "rb") as vf:
+            sent = await bot.send_video(
+                chat_id=chat_id,
+                video=vf,
+                caption=clean_caption,
+                supports_streaming=True,
+                reply_markup=reply_markup,
+                write_timeout=180,
+                read_timeout=120,
+                connect_timeout=30,
+            )
+            return sent
+    except TelegramError as e2:
+        logger.warning("Tier 2 send_video failed: %s. Trying Tier 3 (send_document)...", e2)
+
+    # Tier 3: send_document fallback
+    with open(video_path, "rb") as vf:
+        sent = await bot.send_document(
+            chat_id=chat_id,
+            document=vf,
+            filename=video_path.name,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            write_timeout=240,
+            read_timeout=120,
+            connect_timeout=30,
+        )
+        return sent
 
 
 def kb_admin_panel() -> InlineKeyboardMarkup:
@@ -544,10 +663,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user:
         return
 
+    # Non-blocking async DB write (0ms delay for user response!)
+    asyncio.create_task(asyncio.to_thread(upsert_user, user.id, user.username, user.first_name))
+
+    # Instant typing feedback (< 0.1s!)
     try:
-        upsert_user(user.id, user.username, user.first_name)
-    except Exception as e:
-        logger.warning("upsert_user error in cmd_start: %s", e)
+        await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
+    except Exception:
+        pass
 
     name = safe_html(user.first_name or user.username or "Friend")
 
@@ -986,6 +1109,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "check_joined":
         unjoined = await get_unjoined_channels(context.bot, uid)
         if not unjoined:
+            cache_user_membership(uid, True)
             await q.answer("Verification successful! Welcome!", show_alert=False)
             try:
                 await q.edit_message_text(
@@ -1034,7 +1158,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user    = update.effective_user
     text    = (message.text or "").strip()
 
-    upsert_user(user.id, user.username, user.first_name)
+    if user:
+        asyncio.create_task(asyncio.to_thread(upsert_user, user.id, user.username, user.first_name))
 
     # ── Quick Cancel interceptor (command or button text) ────────────────
     if text.lower() in ("/cancel", "cancel", "❌ cancel", "abort"):
@@ -1356,25 +1481,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     sc = extract_shortcode(text) or ""
                     v_kb = kb_video_actions(sc) if sc else None
 
-                    with open(video_path, "rb") as vf:
-                        await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
-                        sent_vid = await context.bot.send_video(
-                            chat_id=message.chat_id,
-                            video=vf,
-                            caption=video_caption,
-                            parse_mode=ParseMode.HTML,
-                            supports_streaming=True,
-                            reply_markup=v_kb,
-                            write_timeout=180,
-                            read_timeout=120,
-                            connect_timeout=30,
+                    await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
+                    sent_vid = await _send_video_resilient(
+                        bot=context.bot,
+                        chat_id=message.chat_id,
+                        video_path=video_path,
+                        caption=video_caption,
+                        reply_markup=v_kb,
+                    )
+                    vid_file_id = get_media_file_id(sent_vid)
+                    if sc and vid_file_id:
+                        set_cached_media(
+                            shortcode=sc,
+                            video_file_id=vid_file_id,
+                            caption=caption_text,
                         )
-                        if sc and sent_vid.video:
-                            set_cached_media(
-                                shortcode=sc,
-                                video_file_id=sent_vid.video.file_id,
-                                caption=caption_text,
-                            )
 
                 # ── Case B: Single Photo or Carousel ──────────────────────
                 elif image_paths:
@@ -1417,14 +1538,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 # ── Monospace Caption (1-Tap Copy - NO PROMOTION BELOW CAPTION) ──
                 if caption_text:
-                    chunks = [caption_text[i : i + 3900] for i in range(0, len(caption_text), 3900)]
-                    header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
-                    for chunk in chunks:
-                        await message.reply_text(
-                            f"{header}<code>{html.escape(chunk)}</code>",
-                            parse_mode=ParseMode.HTML,
-                        )
-                        header = ""
+                    try:
+                        chunks = [caption_text[i : i + 3900] for i in range(0, len(caption_text), 3900)]
+                        header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
+                        for chunk in chunks:
+                            await message.reply_text(
+                                f"{header}<code>{html.escape(chunk)}</code>",
+                                parse_mode=ParseMode.HTML,
+                            )
+                            header = ""
+                    except Exception as cap_err:
+                        logger.warning("Failed to send post caption: %s", cap_err)
 
                 log_download(user.id, text, True)
                 logger.info("DL done  | user=%s", user.id)
@@ -1452,10 +1576,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"{E_CLOCK_TIME} {now_str()}\n"
                     f"<pre>{html.escape(str(exc)[:400])}</pre>",
                 )
+                file_size_mb = 0
+                if video_path and Path(video_path).exists():
+                    file_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
+
+                if file_size_mb > 50:
+                    err_user_text = (
+                        f"{E_BROKEN_HEART} <b>File exceeds Telegram limits ({file_size_mb:.1f} MB).</b>\n\n"
+                        "Telegram bot API restricts file uploads to 50MB max."
+                    )
+                else:
+                    err_user_text = (
+                        f"{E_BROKEN_HEART} <b>Couldn't send the media.</b>\n\n"
+                        "Telegram encountered a temporary error delivering the file.\n"
+                        "Please try sending the link again."
+                    )
                 await status_msg.edit_text(
-                    f"{E_BROKEN_HEART} <b>Couldn't send the media.</b>\n\n"
-                    "The file may be too large for Telegram.\n"
-                    "Please try again.",
+                    err_user_text,
                     parse_mode=ParseMode.HTML,
                 )
 

@@ -185,6 +185,9 @@ def _strip_metadata(input_path: Path, output_path: Path) -> bool:
         if result.returncode != 0:
             logger.error("ffmpeg error: %s", result.stderr[-500:])
             return False
+        if not output_path.exists() or output_path.stat().st_size < 1000:
+            logger.warning("ffmpeg output empty or too small (<1KB), falling back to raw video")
+            return False
         return True
     except subprocess.TimeoutExpired:
         logger.error("ffmpeg timed out")
@@ -243,7 +246,7 @@ def download_instagram(url: str) -> dict:
             clean_video = work_dir / "clean_media.mp4"
             stripped    = _strip_metadata(raw_video, clean_video)
 
-            final_video          = clean_video if stripped else raw_video
+            final_video          = clean_video if (stripped and clean_video.exists() and clean_video.stat().st_size > 1000) else raw_video
             result["video_path"] = final_video
             result["is_video"]   = True
             result["success"]    = True
