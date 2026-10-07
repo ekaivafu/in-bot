@@ -157,8 +157,17 @@ ADMIN_ID = sorted(list(ADMIN_IDS))[0]   # Primary admin ID for fallback
 MAX_CONCURRENT = 2
 MAX_QUEUE      = 6   # max users allowed to wait; beyond this → "try later"
 
-_semaphore: asyncio.Semaphore | None = None   # initialised in post_init
+_semaphore: asyncio.Semaphore | None = None   # initialised in post_init or get_download_semaphore
 _waiting_count: int = 0                        # users queued but not yet downloading
+_active_count: int = 0                         # users actively downloading
+
+
+def get_download_semaphore() -> asyncio.Semaphore:
+    """Return download semaphore, lazily initializing if needed."""
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    return _semaphore
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -633,7 +642,7 @@ def build_stats_text() -> str:
     channels   = get_all_channels()
     ch_count   = len(channels)
     ch_summary = f"{ch_count} Active" if ch_count > 0 else "None"
-    q_active   = (MAX_CONCURRENT - _semaphore._value) if _semaphore else 0
+    q_active   = _active_count
     return (
         f"{E_ARC_REACTOR} <b>Bot Statistics & Health</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1356,10 +1365,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("Cache send failed for %s, falling back to fresh download: %s", shortcode, exc)
 
     # ── Queue capacity check ───────────────────────────────────────────────
+    global _waiting_count, _active_count
     if _waiting_count >= MAX_QUEUE:
         await message.reply_text(
             f"{E_WARNING} <b>Queue Full</b>\n\n"
-            "The bot is very busy right now.\n"
+            f"The bot is currently handling high traffic ({_waiting_count} users in queue).\n"
             "Please try again in a minute!",
             parse_mode=ParseMode.HTML,
         )
@@ -1368,34 +1378,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── Queue and download ─────────────────────────────────────────────────
     _waiting_count += 1
     q_pos = _waiting_count
-
-    # Send premium pulsing heart emoji while downloading
+    waiting_decremented = False
     heart_msg = None
-    try:
-        heart_msg = await message.reply_text(
-            f"{E_HEART_RED}",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception:
-        pass
+    status_msg = None
 
-    if _semaphore and _semaphore._value == 0:
-        status_msg = await message.reply_text(
-            f"{E_RING_LOADER} <b>Queued</b> — you're #{q_pos} in line.\n"
-            "Hang tight, your download will start shortly...",
-            parse_mode=ParseMode.HTML,
-        )
-    else:
-        status_msg = await message.reply_text(
-            f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n"
-            "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
-            "<i>Initializing secure stream...</i>",
-            parse_mode=ParseMode.HTML,
-        )
+    sem = get_download_semaphore()
+    is_queued = sem.locked() or (_active_count >= MAX_CONCURRENT)
 
     try:
-        async with _semaphore:
-            _waiting_count = max(0, _waiting_count - 1)
+        # Send premium pulsing heart emoji while downloading
+        try:
+            heart_msg = await message.reply_text(
+                f"{E_HEART_RED}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        if is_queued:
+            status_msg = await message.reply_text(
+                f"{E_RING_LOADER} <b>Queued</b> — you're #{q_pos} in line.\n"
+                "Hang tight, your download will start shortly...",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            status_msg = await message.reply_text(
+                f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n"
+                "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
+                "<i>Initializing secure stream...</i>",
+                parse_mode=ParseMode.HTML,
+            )
+
+        async with sem:
+            if not waiting_decremented:
+                _waiting_count = max(0, _waiting_count - 1)
+                waiting_decremented = True
+
+            _active_count += 1
+            # If the user was queued, update status immediately once their turn begins!
+            if is_queued and status_msg:
+                try:
+                    await status_msg.edit_text(
+                        f"{E_LIGHTNING} <b>Download Started!</b>\n"
+                        "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
+                        "<i>Connecting to Instagram...</i>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
 
             # Start smooth background animation ticker
             stop_event = asyncio.Event()
@@ -1618,6 +1648,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             finally:
                 main_path = video_path or (image_paths[0] if image_paths else None)
                 cleanup_session(main_path)
+                _active_count = max(0, _active_count - 1)
 
     except Exception as exc:
         if 'heart_msg' in locals() and heart_msg:
@@ -1633,10 +1664,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"{E_CLOCK_TIME} {now_str()}\n"
             f"<pre>{html.escape(str(exc)[:400])}</pre>",
         )
-        try:
-            await status_msg.edit_text(f"{E_BROKEN_HEART} <b>Something went wrong. Please try again.</b>", parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        if 'status_msg' in locals() and status_msg:
+            try:
+                await status_msg.edit_text(f"{E_BROKEN_HEART} <b>Something went wrong. Please try again.</b>", parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+    finally:
+        if not waiting_decremented:
+            _waiting_count = max(0, _waiting_count - 1)
 
 
 
