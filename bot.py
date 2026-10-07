@@ -382,8 +382,9 @@ def stop_cookie_reminder(job_queue) -> None:
 
 
 # ── Reply Keyboard Button Labels ──────────────────────────────────────────────
-# User buttons (About removed - Help is enough)
+# User buttons
 BTN_HELP        = "📖 Help"
+BTN_WATCHLIST   = "🎯 My Watchlist"
 
 # Admin buttons
 BTN_STATS       = "📊 Stats"
@@ -391,24 +392,26 @@ BTN_MAINT       = "🔧 Maintenance"
 BTN_BROADCAST   = "📢 Broadcast"
 BTN_CHANNELS    = "📺 Channels"
 BTN_COOKIE      = "🍪 Cookie Status"
+BTN_SERVERS     = "⚡ Servers"
+BTN_SCOUT       = "🎯 Scout"
 BTN_CLOSE_MENU  = "❌ Close Menu"
 
 ALL_BTNS = {
-    BTN_HELP,
+    BTN_HELP, BTN_WATCHLIST,
     BTN_STATS, BTN_MAINT, BTN_BROADCAST,
-    BTN_CHANNELS, BTN_COOKIE, BTN_CLOSE_MENU,
+    BTN_CHANNELS, BTN_COOKIE, BTN_SERVERS, BTN_SCOUT, BTN_CLOSE_MENU,
 }
 
 
 # ── Reply Keyboard Builders ────────────────────────────────────────────────────
 def rkb_user() -> ReplyKeyboardMarkup:
-    """Persistent bottom keyboard for regular users (clean - Help only)."""
+    """Persistent bottom keyboard for regular users."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_HELP)],
+            [KeyboardButton(BTN_WATCHLIST), KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Paste an Instagram link...",
+        input_field_placeholder="Paste an Instagram link or tap Watchlist...",
     )
 
 
@@ -426,13 +429,168 @@ def rkb_admin() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(BTN_STATS),       KeyboardButton(BTN_BROADCAST)],
+            [KeyboardButton(BTN_SERVERS),     KeyboardButton(BTN_SCOUT)],
             [KeyboardButton(maint_label),     KeyboardButton(chan_label)],
-            [KeyboardButton(cookie_label)],
-            [KeyboardButton(BTN_CLOSE_MENU)],
+            [KeyboardButton(cookie_label),    KeyboardButton(BTN_CLOSE_MENU)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin mode active...",
     )
+
+
+# ── Watchlist, Cluster, and Scout Inline UI Builders ──────────────────────────
+def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Generate dynamic text and interactive inline keyboard for personal watchlist."""
+    admin_flag = is_admin(user_id)
+    user_limit = get_user_scout_limit(user_id)
+    my_creators = get_user_watchlist(user_id)
+    limit_str = "Unlimited 👑" if admin_flag else f"{user_limit}"
+
+    text = (
+        f"🎯 <b>Your Creator Watchlist</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>Active Slots:</b> <b>{len(my_creators)} / {limit_str}</b>\n\n"
+    )
+    if my_creators:
+        text += "<b>Monitored Creators:</b>\n"
+        text += "\n".join(f"  • @{html.escape(c)}" for c in my_creators) + "\n\n"
+        text += "🚀 <i>Viral reels (5k+ likes, 0–5 days) from these accounts will be auto-delivered here!</i>\n"
+    else:
+        text += "<i>You are not monitoring any creators yet.</i>\n\n"
+        text += "Tap <b>➕ Add Creator</b> below to start monitoring!\n"
+
+    buttons = []
+    row1 = [InlineKeyboardButton("➕ Add Creator", callback_data="watch_add_btn")]
+    if my_creators:
+        row1.append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="watch_del_menu"))
+    buttons.append(row1)
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh")])
+
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def kb_watchlist_delete(user_id: int) -> InlineKeyboardMarkup:
+    """Generate inline buttons for each creator on user's watchlist to remove with 1 tap."""
+    my_creators = get_user_watchlist(user_id)
+    buttons = []
+    for c in my_creators:
+        buttons.append([InlineKeyboardButton(f"❌ Remove @{c}", callback_data=f"watch_rm:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Watchlist", callback_data="watch_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_cluster_text() -> tuple[str, InlineKeyboardMarkup]:
+    """Generate dynamic cluster status text and interactive buttons."""
+    status = get_cluster_status()
+    servers = status["servers"]
+    total_creators = status["total_creators"]
+    unassigned = status["unassigned"]
+
+    lines = [
+        "⚡ <b>Child Server Cluster & Load Balancing</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🖥️ <b>Active Servers:</b> {len(servers)}",
+        f"👥 <b>Total Monitored Creators:</b> {total_creators}\n",
+    ]
+
+    if not servers:
+        lines.append("<i>No child servers registered. Workers operate in standalone mode.</i>\n")
+        lines.append("💡 <i>Tap <b>➕ Add Server URL</b> or <b>🚀 1-Click Deploy</b> below to register a server!</i>\n")
+    else:
+        for s in servers:
+            c_list = s["creators"]
+            count = len(c_list)
+            pct = f"({count/total_creators*100:.0f}%)" if total_creators > 0 else ""
+            uptime_info = f"✅ Monitored (ID: <code>{s['uptimerobot_id']}</code>)" if s["uptimerobot_id"] else "⚠️ No UptimeRobot ID"
+            c_str = ", ".join(f"@{c}" for c in c_list) if c_list else "<i>None assigned</i>"
+            lines.append(
+                f"<b>Server #{s['id']}: {html.escape(s['name'])}</b>\n"
+                f"  🔗 URL: <code>{html.escape(s['url'] or 'N/A')}</code>\n"
+                f"  🤖 Uptime: {uptime_info}\n"
+                f"  📊 Workload: <b>{count} creators</b> {pct}\n"
+                f"  👥 Accounts: {c_str}\n"
+            )
+
+        if unassigned:
+            lines.append(f"⚠️ <b>Unassigned Creators ({len(unassigned)}):</b> {', '.join('@'+c for c in unassigned)}")
+            lines.append("<i>Tap <b>⚖️ Rebalance Workload</b> to distribute unassigned creators evenly.</i>\n")
+
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add Server URL", callback_data="adm_srv_add_btn"),
+            InlineKeyboardButton("🚀 1-Click Deploy", callback_data="adm_srv_deploy_btn"),
+        ],
+        [
+            InlineKeyboardButton("⚖️ Rebalance Workload", callback_data="adm_srv_rebalance"),
+        ],
+    ]
+    if servers:
+        buttons[1].append(InlineKeyboardButton("🗑️ Remove Server", callback_data="adm_srv_del_menu"))
+    buttons.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="adm_srv_refresh"),
+        InlineKeyboardButton("⬅️ Admin Panel", callback_data="adm_panel"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def kb_cluster_delete() -> InlineKeyboardMarkup:
+    """Generate inline buttons for each active child server to delete with 1 tap."""
+    servers = get_active_child_servers()
+    buttons = []
+    for s in servers:
+        buttons.append([InlineKeyboardButton(f"❌ #{s['id']}: {s['name'][:18]}", callback_data=f"adm_srv_del:{s['id']}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Servers", callback_data="adm_srv_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
+    """Generate dynamic scout overview text and interactive buttons."""
+    creators = get_active_watchlist()
+    pending = get_pending_viral_reels(limit=5)
+    servers = get_active_child_servers()
+
+    text = (
+        "🎯 <b>Viral Reel Scout System</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
+        f"🖥️ <b>Connected Servers:</b> {len(servers)} servers\n"
+    )
+    if creators:
+        text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
+        if len(creators) > 8:
+            text += f" (+{len(creators)-8} more)"
+        text += "\n"
+    else:
+        text += "   <i>None yet.</i>\n"
+
+    text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
+    text += "<i>Use buttons below to manage target creators and workers:</i>"
+
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add Creator", callback_data="adm_scout_add_btn"),
+        ],
+    ]
+    if creators:
+        buttons[0].append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"))
+    buttons.append([
+        InlineKeyboardButton("⚡ Manage Servers", callback_data="adm_srv_menu"),
+        InlineKeyboardButton("🔄 Refresh", callback_data="adm_scout_refresh"),
+    ])
+    buttons.append([InlineKeyboardButton("⬅️ Admin Panel", callback_data="adm_panel")])
+
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def kb_scout_delete() -> InlineKeyboardMarkup:
+    """Generate inline buttons for creators in scout watchlist to remove with 1 tap."""
+    creators = get_active_watchlist()
+    buttons = []
+    for c in creators[:20]:
+        buttons.append([InlineKeyboardButton(f"❌ Remove @{c}", callback_data=f"adm_scout_del:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Scout", callback_data="adm_scout_refresh")])
+    return InlineKeyboardMarkup(buttons)
 
 
 # ── Keyboards (inline) ─────────────────────────────────────────────────────────
@@ -526,19 +684,22 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
     cookie_flag = get_setting("cookie_alert_active", "0") == "1"
     chan_count  = get_channel_count()
     chan_label  = f"📺 Channels: {chan_count} Active" if chan_count > 0 else "📺 Channels: None ⚠️"
+    srv_count   = len(get_active_child_servers())
+    srv_label   = f"⚡ Servers ({srv_count})" if srv_count > 0 else "⚡ Servers: None"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Stats",      callback_data="adm_stats"),
-            InlineKeyboardButton("📢 Broadcast",  callback_data="adm_broadcast"),
+            InlineKeyboardButton("📊 Stats",           callback_data="adm_stats"),
+            InlineKeyboardButton("📢 Broadcast",       callback_data="adm_broadcast"),
+        ],
+        [
+            InlineKeyboardButton(srv_label,            callback_data="adm_srv_menu"),
+            InlineKeyboardButton("🎯 Viral Scout",     callback_data="adm_scout_view"),
         ],
         [
             InlineKeyboardButton(f"🔧 Maintenance: {maint}", callback_data="adm_maint_toggle"),
         ],
         [
             InlineKeyboardButton(chan_label, callback_data="adm_chan_menu"),
-        ],
-        [
-            InlineKeyboardButton("🎯 Viral Reel Scout", callback_data="adm_scout_view"),
         ],
         [
             InlineKeyboardButton(
@@ -1049,34 +1210,140 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=kb_back_admin(),
         )
 
-    elif data == "adm_scout_view":
-        creators = get_active_watchlist()
-        pending = get_pending_viral_reels(limit=5)
-        text = (
-            f"🎯 <b>Viral Reel Scout System</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
-        )
-        if creators:
-            text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
-            if len(creators) > 8:
-                text += f" (+{len(creators)-8} more)"
-            text += "\n"
-        else:
-            text += "   <i>None yet.</i>\n"
+    # ── User Watchlist Interactive Callbacks ──────────────────────────────
+    elif data == "watch_refresh":
+        text, kb = build_watchlist_text(uid)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-        text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
-        text += (
-            "<b>Management Commands:</b>\n"
-            "• <code>/scout add &lt;creator&gt;</code> - Add creator\n"
-            "• <code>/scout remove &lt;creator&gt;</code> - Remove creator\n"
-            "• <code>/scout list</code> - Show all target creators\n"
+    elif data == "watch_add_btn":
+        context.user_data["state"] = "awaiting_user_watch_add"
+        await q.message.reply_html(
+            f"{E_NEON_RINGS} <b>Add Creator to Watchlist</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send the Instagram username to monitor:\n"
+            "Example: <code>@nike</code> or <code>cristiano</code>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
         )
+
+    elif data == "watch_del_menu":
+        my_creators = get_user_watchlist(uid)
+        if not my_creators:
+            await q.answer("Your watchlist is already empty!", show_alert=True)
+            return
         await q.edit_message_text(
-            text,
+            "🗑️ <b>Remove Creator from Watchlist</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Tap a creator below to remove them from your monitored list:",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_back_admin(),
+            reply_markup=kb_watchlist_delete(uid),
         )
+
+    elif data.startswith("watch_rm:"):
+        creator = data.split(":", 1)[1].strip()
+        remove_user_watchlist_creator(uid, creator)
+        await q.answer(f"Removed @{creator} from watchlist.")
+        text, kb = build_watchlist_text(uid)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    # ── Admin Cluster & Child Server Callbacks ─────────────────────────────
+    elif data in ("adm_srv_menu", "adm_srv_refresh"):
+        text, kb = build_cluster_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+    elif data == "adm_srv_add_btn":
+        context.user_data["state"] = "awaiting_server_url"
+        await q.message.reply_html(
+            "🖥️ <b>Add Existing Child Server URL</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send your Render child server URL:\n"
+            "Example: <code>https://instabot-worker-2.onrender.com Worker2</code>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+        )
+
+    elif data == "adm_srv_deploy_btn":
+        context.user_data["state"] = "awaiting_render_api_key"
+        repo_disp = os.getenv("GITHUB_REPO_URL", "Not set in .env")
+        await q.message.reply_html(
+            f"🚀 <b>1-Click Auto Deploy on Render</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send your Render API Key (from Render Account Settings → API Keys):\n"
+            "Example: <code>rnd_xxxxxxxxxxxx</code>\n\n"
+            f"🌐 <i>Using repo: <code>{html.escape(repo_disp)}</code></i>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+            disable_web_page_preview=True,
+        )
+
+    elif data == "adm_srv_rebalance":
+        rebalance_creator_workload()
+        await q.answer("⚖️ Creators rebalanced evenly across all active servers!", show_alert=True)
+        text, kb = build_cluster_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+    elif data == "adm_srv_del_menu":
+        servers = get_active_child_servers()
+        if not servers:
+            await q.answer("No active child servers to remove!", show_alert=True)
+            return
+        await q.edit_message_text(
+            "🗑️ <b>Remove Child Server</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Tap a server below to remove it from cluster and redistribute accounts:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_cluster_delete(),
+        )
+
+    elif data.startswith("adm_srv_del:"):
+        try:
+            target_sid = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Invalid server ID")
+            return
+        s_info = get_child_server(target_sid)
+        if s_info and s_info.get("uptimerobot_id"):
+            cloud_manager.delete_uptimerobot_monitor(s_info["uptimerobot_id"])
+        remove_child_server(target_sid)
+        await q.answer(f"Server #{target_sid} removed and accounts redistributed!", show_alert=True)
+        text, kb = build_cluster_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+    # ── Admin Scout Callbacks ──────────────────────────────────────────────
+    elif data in ("adm_scout_view", "adm_scout_refresh"):
+        text, kb = build_scout_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "adm_scout_add_btn":
+        context.user_data["state"] = "awaiting_admin_scout_add"
+        await q.message.reply_html(
+            "➕ <b>Add Target Creator to Scout</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send the Instagram creator username:\n"
+            "Example: <code>@cristiano</code> or <code>nike</code>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+        )
+
+    elif data == "adm_scout_del_menu":
+        creators = get_active_watchlist()
+        if not creators:
+            await q.answer("Scout watchlist is empty!", show_alert=True)
+            return
+        await q.edit_message_text(
+            "🗑️ <b>Remove Creator from Scout</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Tap a creator below to stop scouting:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_scout_delete(),
+        )
+
+    elif data.startswith("adm_scout_del:"):
+        creator = data.split(":", 1)[1].strip()
+        remove_watchlist_creator(creator)
+        await q.answer(f"Removed @{creator} from scout.")
+        text, kb = build_scout_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     # ── Audio Extraction Callback ─────────────────────────────────────────
     elif data.startswith("audio:"):
@@ -1256,8 +1523,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await cmd_start(update, context)
         return
 
-    # ── Admin state machine ────────────────────────────────────────────────
+    # ── State Machine (User and Admin) ────────────────────────────────────
     state = context.user_data.get("state")
+
+    if state == "awaiting_user_watch_add":
+        context.user_data.pop("state", None)
+        creator = text.strip().lstrip("@").lower()
+        admin_flag = is_admin(user.id)
+        user_limit = get_user_scout_limit(user.id)
+        success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag)
+        if success:
+            text_resp, kb = build_watchlist_text(user.id)
+            await message.reply_html(
+                f"{E_CONFETTI} <b>Added @{html.escape(creator)} to your Watchlist!</b>\n\n" + text_resp,
+                reply_markup=kb,
+            )
+        elif reason == "limit_reached":
+            await message.reply_html(
+                f"🔒 <b>Watchlist Slot Limit Reached!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Your current plan allows monitoring <b>{user_limit}</b> creator account(s).\n"
+                f"💎 Contact Admin to upgrade your slots!\n\n"
+                f"<i>Tap below to remove a creator first:</i>",
+                reply_markup=kb_watchlist_delete(user.id),
+            )
+        elif reason == "already_exists":
+            text_resp, kb = build_watchlist_text(user.id)
+            await message.reply_html(f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>\n\n" + text_resp, reply_markup=kb)
+        else:
+            await message.reply_html(f"⚠️ <b>Could not add @{html.escape(creator)}. Please try again.</b>")
+        return
 
     if is_admin(user.id):
         if state == "awaiting_broadcast":
@@ -1278,6 +1573,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 context.user_data.pop("state", None)
                 await message.reply_text(f"{E_WARNING} <b>No channel to link.</b> Add a channel first.", parse_mode=ParseMode.HTML, reply_markup=rkb_admin())
+            return
+        if state == "awaiting_admin_scout_add":
+            context.user_data.pop("state", None)
+            creator = text.strip().lstrip("@").lower()
+            add_watchlist_creator(creator, added_by=user.id)
+            text_resp, kb = build_scout_text()
+            await message.reply_html(f"✅ <b>Added @{html.escape(creator)} to scout watchlist!</b>\n\n" + text_resp, reply_markup=kb)
+            return
+        if state == "awaiting_server_url":
+            context.user_data.pop("state", None)
+            parts = text.split()
+            url = parts[0].strip()
+            name = " ".join(parts[1:]).strip() if len(parts) > 1 else f"Worker-{int(time.time()) % 1000}"
+            uptimerobot_id = ""
+            uptime_note = ""
+            if os.getenv("UPTIMEROBOT_API_KEY", "").strip():
+                ok_uptime, res_uptime = cloud_manager.create_uptimerobot_monitor(server_url=url, friendly_name=name)
+                if ok_uptime:
+                    uptimerobot_id = res_uptime
+                    uptime_note = f"✅ UptimeRobot 24/7 Monitor created (ID: <code>{uptimerobot_id}</code>)"
+                else:
+                    uptime_note = f"⚠️ UptimeRobot monitor skipped: {res_uptime}"
+            else:
+                uptime_note = "ℹ️ UptimeRobot monitor not created (UPTIMEROBOT_API_KEY not in .env)"
+
+            server_id = add_child_server(name=name, url=url, uptimerobot_id=uptimerobot_id)
+            text_resp, kb = build_cluster_text()
+            await message.reply_html(
+                f"🎉 <b>Child Server #{server_id} Added & Load Divided!</b>\n"
+                f"🖥️ <b>Name:</b> {html.escape(name)}\n"
+                f"🔗 <b>URL:</b> <code>{html.escape(url)}</code>\n"
+                f"{uptime_note}\n\n" + text_resp,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            return
+        if state == "awaiting_render_api_key":
+            context.user_data.pop("state", None)
+            render_api_key = text.strip()
+            repo_url = os.getenv("GITHUB_REPO_URL", "").strip()
+            if not repo_url:
+                await message.reply_html("⚠️ <b>GITHUB_REPO_URL not set in .env!</b> Please set it first.")
+                return
+            prog = await message.reply_html("⏳ <b>Deploying Child Worker to Render...</b>")
+            active_servers = get_active_child_servers()
+            next_worker_id = len(active_servers) + 1
+            ok, res = await asyncio.to_thread(
+                cloud_manager.deploy_render_child_service,
+                render_api_key=render_api_key,
+                repo_url=repo_url,
+                db_url=os.getenv("DATABASE_URL", "").strip(),
+                bot_token=BOT_TOKEN,
+                admin_id=ADMIN_ID,
+                worker_id=next_worker_id,
+                service_name=f"instabot-scout-{next_worker_id}",
+            )
+            if not ok:
+                await prog.edit_text(f"❌ <b>Render Deploy Failed:</b>\n\n<code>{html.escape(str(res))}</code>", parse_mode=ParseMode.HTML)
+                return
+            srv_id = res.get("service_id", "")
+            srv_url = res.get("url", "")
+            srv_name = res.get("name", f"Worker-{next_worker_id}")
+            uptimerobot_id = ""
+            uptime_note = ""
+            if os.getenv("UPTIMEROBOT_API_KEY", "").strip():
+                ok_u, res_u = await asyncio.to_thread(cloud_manager.create_uptimerobot_monitor, server_url=srv_url, friendly_name=srv_name)
+                if ok_u:
+                    uptimerobot_id = res_u
+                    uptime_note = f"✅ UptimeRobot 24/7 Monitor created (ID: <code>{uptimerobot_id}</code>)"
+                else:
+                    uptime_note = f"⚠️ UptimeRobot skipped: {res_u}"
+            server_id = add_child_server(name=srv_name, render_service_id=srv_id, url=srv_url, uptimerobot_id=uptimerobot_id)
+            text_resp, kb = build_cluster_text()
+            await prog.edit_text(
+                f"🎉 <b>Render Child Worker #{server_id} Deployed!</b>\n"
+                f"🖥️ <b>Name:</b> {html.escape(srv_name)}\n"
+                f"🆔 <b>Render Service ID:</b> <code>{srv_id}</code>\n"
+                f"🔗 <b>Worker URL:</b> <code>{html.escape(srv_url)}</code>\n"
+                f"{uptime_note}\n\n" + text_resp,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
             return
 
     # ── Admin cookie document upload ───────────────────────────────────────
@@ -1753,6 +2131,11 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
         )
         return
 
+    elif text == BTN_WATCHLIST:
+        text_resp, kb = build_watchlist_text(user.id)
+        await message.reply_html(text_resp, reply_markup=kb)
+        return
+
     # ── Admin-only buttons ─────────────────────────────────────────────────
     if not is_admin(user.id):
         await message.reply_text(f"{E_WARNING} <b>Admin only.</b>", parse_mode=ParseMode.HTML)
@@ -1760,6 +2143,14 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
 
     if text == BTN_STATS:
         await message.reply_text(build_stats_text(), parse_mode=ParseMode.HTML)
+
+    elif text == BTN_SERVERS:
+        text_resp, kb = build_cluster_text()
+        await message.reply_html(text_resp, reply_markup=kb, disable_web_page_preview=True)
+
+    elif text == BTN_SCOUT:
+        text_resp, kb = build_scout_text()
+        await message.reply_html(text_resp, reply_markup=kb)
 
     elif text == BTN_BROADCAST:
         context.user_data["state"] = "awaiting_broadcast"
@@ -2224,36 +2615,9 @@ async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except ValueError:
                 pass
 
-    # Default /scout info overview
-    creators = get_active_watchlist()
-    pending = get_pending_viral_reels(limit=5)
-
-    text = (
-        "🎯 <b>Autonomous Viral Reel Scout</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
-    )
-    if creators:
-        text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
-        if len(creators) > 8:
-            text += f" (+{len(creators)-8} more)"
-        text += "\n"
-    else:
-        text += "   <i>None yet. Use /scout add &lt;creator&gt;</i>\n"
-
-    text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
-    text += (
-        "<b>Commands:</b>\n"
-        "• <code>/scout add &lt;username&gt;</code> - Add target creator\n"
-        "• <code>/scout remove &lt;username&gt;</code> - Remove creator\n"
-        "• <code>/scout list</code> - Show all target creators\n"
-        "• <code>/setlimit &lt;user_id&gt; &lt;limit&gt;</code> - Set user limit\n"
-        "• <code>/cluster</code> - View multi-server cluster & load balance\n"
-        "• <code>/deploy_child &lt;render_api_key&gt;</code> - 1-Click auto deploy child server\n"
-        "• <code>/addserver &lt;url&gt; [name]</code> - Add existing child server\n"
-        "• <code>/rebalance</code> - Rebalance creators evenly across servers\n"
-    )
-    await update.message.reply_html(text)
+    # Default /scout info overview with interactive buttons
+    text, kb = build_scout_text()
+    await update.message.reply_html(text, reply_markup=kb)
 
 
 # ── User Creator Watchlist Command ─────────────────────────────────────────────
@@ -2284,7 +2648,6 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"it will be automatically downloaded, protected, and sent to you here!</i>"
                 )
             elif reason == "limit_reached":
-                bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
                 await update.message.reply_html(
                     f"🔒 <b>Watchlist Slot Limit Reached!</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2312,25 +2675,9 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-    # Default /watch display
-    text = (
-        f"🎯 <b>Your Creator Watchlist</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 <b>Active Slots:</b> {len(my_creators)} / {limit_str}\n\n"
-    )
-    if my_creators:
-        text += "<b>Monitored Creators:</b>\n"
-        text += "\n".join(f"  • @{html.escape(c)}" for c in my_creators) + "\n\n"
-    else:
-        text += "<i>You are not monitoring any creators yet.</i>\n\n"
-
-    text += (
-        "<b>Commands:</b>\n"
-        "• <code>/watch add &lt;username&gt;</code> - Monitor a creator\n"
-        "• <code>/watch remove &lt;username&gt;</code> - Stop monitoring\n\n"
-        f"💡 <i>Free users can monitor 1 creator at a time. Contact Admin to unlock more slots!</i>"
-    )
-    await update.message.reply_html(text)
+    # Default /watch display with interactive buttons
+    text, kb = build_watchlist_text(user.id)
+    await update.message.reply_html(text, reply_markup=kb)
 
 
 # ── Admin Slot Limit Commands ──────────────────────────────────────────────────
@@ -2400,48 +2747,8 @@ async def cmd_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not user or not is_admin(user.id):
         return
 
-    status = get_cluster_status()
-    servers = status["servers"]
-    total_creators = status["total_creators"]
-    unassigned = status["unassigned"]
-
-    lines = [
-        "⚡ <b>Child Server Cluster & Load Balancing</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🖥️ <b>Active Servers:</b> {len(servers)}",
-        f"👥 <b>Total Monitored Creators:</b> {total_creators}\n",
-    ]
-
-    if not servers:
-        lines.append("<i>No child servers registered. Workers operate in standalone mode.</i>\n")
-        lines.append("💡 <i>Use <code>/addserver &lt;url&gt; [name]</code> or <code>/deploy_child &lt;render_api_key&gt;</code> to register a child server!</i>\n")
-    else:
-        for s in servers:
-            c_list = s["creators"]
-            count = len(c_list)
-            pct = f"({count/total_creators*100:.0f}%)" if total_creators > 0 else ""
-            uptime_info = f"✅ Monitored (ID: <code>{s['uptimerobot_id']}</code>)" if s["uptimerobot_id"] else "⚠️ No UptimeRobot ID"
-            c_str = ", ".join(f"@{c}" for c in c_list) if c_list else "<i>None assigned</i>"
-            lines.append(
-                f"<b>Server #{s['id']}: {html.escape(s['name'])}</b>\n"
-                f"  🔗 URL: <code>{html.escape(s['url'] or 'N/A')}</code>\n"
-                f"  🤖 Uptime: {uptime_info}\n"
-                f"  📊 Assigned Workload: <b>{count} creators</b> {pct}\n"
-                f"  👥 Accounts: {c_str}\n"
-            )
-
-        if unassigned:
-            lines.append(f"⚠️ <b>Unassigned Creators ({len(unassigned)}):</b> {', '.join('@'+c for c in unassigned)}")
-            lines.append("<i>Run <code>/rebalance</code> to distribute unassigned creators evenly.</i>\n")
-
-    lines.append(
-        "<b>Cluster Management Commands:</b>\n"
-        "• <code>/deploy_child &lt;render_api_key&gt;</code> - 1-Click auto deploy & connect\n"
-        "• <code>/addserver &lt;url&gt; [name]</code> - Register existing child server\n"
-        "• <code>/delserver &lt;server_id&gt;</code> - Remove server & rebalance\n"
-        "• <code>/rebalance</code> - Rebalance creators evenly across servers"
-    )
-    await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
+    text, kb = build_cluster_text()
+    await update.message.reply_html(text, reply_markup=kb, disable_web_page_preview=True)
 
 
 async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
