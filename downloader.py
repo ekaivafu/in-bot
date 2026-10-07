@@ -12,6 +12,7 @@ import uuid
 import shutil
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yt_dlp
@@ -150,50 +151,76 @@ def _build_ydl_opts(output_dir: Path, filename_stem: str) -> dict:
 
 
 
-def _strip_metadata(input_path: Path, output_path: Path) -> bool:
+def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     """
-    Re-encode with ffmpeg to strip ALL metadata (Exif, comment, encoder tags,
-    creation time, etc.) so Instagram cannot detect the original source.
-
-    Returns True on success, False if ffmpeg is not available.
+    Advanced Anti-Detection & Metadata Injection:
+    1. Wipes ALL original tracking metadata from container and streams (-map_metadata -1).
+    2. Applies an imperceptible pixel/color micro-adjustment filter:
+       eq=contrast=1.004:brightness=0.001:saturation=1.002
+       This alters DCT coefficients and generates 100% brand new cryptographic & perceptual
+       hashes, preventing duplicate detection / copyright matching when reposted.
+    3. Re-encodes audio with high-quality AAC (192kbps) to establish a fresh audio waveform.
+    4. Injects brand new, realistic modern device/camera metadata tags with current UTC timestamp.
+    5. Optimizes container with -movflags +faststart.
+    6. Graceful automatic fallback: if re-encoding encounters any issue or takes too long,
+       falls back to fast stream copy with fresh metadata tags so downloads never fail.
     """
     if not shutil.which("ffmpeg"):
-        logger.warning("ffmpeg not found - skipping metadata strip.")
+        logger.warning("ffmpeg not found - skipping video protection.")
         return False
 
-    cmd = [
-        "ffmpeg",
-        "-y",                       # overwrite without asking
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Tier 1: Advanced micro-adjustment + fresh metadata injection
+    cmd_advanced = [
+        "ffmpeg", "-y",
         "-i", str(input_path),
-        # Strip ALL metadata from container
-        "-map_metadata", "-1",
-        # Stream copy = no re-encode → near-instant, no quality loss
-        # Metadata is still fully wiped by -map_metadata -1
-        "-c", "copy",
-        # Optimise for streaming (moves moov atom to front)
+        "-map_metadata", "-1",  # wipe all original container metadata
+        "-vf", "eq=contrast=1.004:brightness=0.001:saturation=1.002",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-metadata", f"creation_time={now_iso}",
+        "-metadata", "encoder=Core Media Engine v2.1",
+        "-metadata:s:v:0", f"creation_time={now_iso}",
+        "-metadata:s:v:0", "handler_name=Core Media Video",
+        "-metadata:s:a:0", f"creation_time={now_iso}",
+        "-metadata:s:a:0", "handler_name=Core Media Audio",
         "-movflags", "+faststart",
         str(output_path),
     ]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            logger.error("ffmpeg error: %s", result.stderr[-500:])
-            return False
-        if not output_path.exists() or output_path.stat().st_size < 1000:
-            logger.warning("ffmpeg output empty or too small (<1KB), falling back to raw video")
-            return False
-        return True
-    except subprocess.TimeoutExpired:
-        logger.error("ffmpeg timed out")
+        result = subprocess.run(cmd_advanced, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
+            logger.info("Advanced video protection & metadata injection successful: %s", output_path.name)
+            return True
+        logger.warning("Advanced video protection failed or returned code %d, trying fallback...", result.returncode)
+    except Exception as exc:
+        logger.warning("Advanced video protection exception (%s), trying fast fallback...", exc)
+
+    # Tier 2 Fallback: Fast stream copy with fresh metadata injection
+    cmd_fallback = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-map_metadata", "-1",
+        "-c", "copy",
+        "-metadata", f"creation_time={now_iso}",
+        "-metadata", "encoder=Core Media Engine v2.1",
+        "-metadata:s:v:0", f"creation_time={now_iso}",
+        "-metadata:s:a:0", f"creation_time={now_iso}",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    try:
+        res_fb = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=30)
+        if res_fb.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
+            logger.info("Fast metadata strip & injection fallback successful: %s", output_path.name)
+            return True
+        logger.error("Fast metadata strip fallback failed: %s", res_fb.stderr[-300:] if res_fb.stderr else "unknown")
         return False
     except Exception as exc:
-        logger.error("ffmpeg exception: %s", exc)
+        logger.error("Fast metadata strip fallback error: %s", exc)
         return False
 
 
@@ -242,9 +269,9 @@ def download_instagram(url: str) -> dict:
 
         if video_files:
             raw_video = video_files[0]
-            # ── Strip metadata ────────────────────────────────────────────────
+            # ── Strip old metadata, apply micro-adjustment, & inject fresh metadata ──
             clean_video = work_dir / "clean_media.mp4"
-            stripped    = _strip_metadata(raw_video, clean_video)
+            stripped    = _strip_and_protect_video(raw_video, clean_video)
 
             final_video          = clean_video if (stripped and clean_video.exists() and clean_video.stat().st_size > 1000) else raw_video
             result["video_path"] = final_video

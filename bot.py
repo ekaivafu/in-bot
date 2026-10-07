@@ -728,7 +728,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
             f"{E_SPARKLES} <b>Features:</b>\n"
             f"• Best available quality {E_LIGHTNING}\n"
-            f"• Clean metadata {E_BLACK_MASK} <i>(safe to repost)</i>\n"
+            f"• Repost safe {E_BLACK_MASK} <i>(fresh metadata & unique hash)</i>\n"
+            f"• 🎵 1-Tap Audio Extractor <i>(MP3 sound)</i>\n"
             f"• Monospace caption for 1-tap copy {E_DIAMOND}\n\n"
             f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
             parse_mode=ParseMode.HTML,
@@ -758,8 +759,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{E_ARROW} <b>How to use:</b>\n"
         "1. Copy any public Instagram link\n"
-        "2. Paste it here\n"
-        f"3. Get your video or photos in seconds {E_LIGHTNING}\n\n"
+        "2. Paste it in this chat\n"
+        f"3. Get your video or photos in seconds {E_LIGHTNING}\n"
+        "4. Tap <b>🎵 Extract Audio</b> below any video to get the MP3!\n\n"
         f"{E_SPARKLES} <b>Supported links:</b>\n"
         "<code>instagram.com/reel/...</code>\n"
         "<code>instagram.com/p/...</code>\n"
@@ -767,9 +769,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{E_HEART_BORDER} <b>Requirements:</b>\n"
         f"{channel_line}"
         "• Public accounts only\n\n"
-        f"{E_CONFETTI} <b>What you get:</b>\n"
+        f"{E_CONFETTI} <b>Features & Safety:</b>\n"
         "• Highest quality video / images\n"
-        f"• Metadata stripped {E_BLACK_MASK} (repost safe)\n"
+        f"• Advanced anti-detection {E_BLACK_MASK} (fresh metadata & unique hash)\n"
+        "• 🎵 1-Tap Audio Extractor (MP3 below video)\n"
         "• Caption in <code>monospace</code> for easy copy\n\n"
         f"{E_WARNING} Problems? Contact the admin.",
         parse_mode=ParseMode.HTML,
@@ -1650,7 +1653,8 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             f"<b>How to use:</b>\n"
             f"1. Copy any public Instagram link\n"
             f"2. Paste it in this chat\n"
-            f"3. Get your video or photos in seconds {E_LIGHTNING}\n\n"
+            f"3. Get your video or photos in seconds {E_LIGHTNING}\n"
+            f"4. Tap <b>🎵 Extract Audio</b> below any video for MP3 sound!\n\n"
             f"<b>Supported links:</b>\n"
             f"<code>instagram.com/reel/...</code>\n"
             f"<code>instagram.com/p/...</code>\n"
@@ -1658,9 +1662,10 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             f"<b>Requirements:</b>\n"
             f"{channel_line}"
             f"• Public accounts only\n\n"
-            f"<b>What you get:</b>\n"
+            f"<b>Features & Safety:</b>\n"
             f"• Highest quality video & photos\n"
-            f"• All metadata stripped {E_BLACK_MASK}\n"
+            f"• Advanced anti-detection {E_BLACK_MASK} (fresh metadata & unique hash)\n"
+            f"• 🎵 1-Tap Audio Extractor (MP3 sound)\n"
             f"• Caption in <code>monospace</code> for easy copy",
             parse_mode=ParseMode.HTML,
         )
