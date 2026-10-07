@@ -64,6 +64,22 @@ MAX_AGE_DAYS = float(os.getenv("MAX_AGE_DAYS", "5.0"))
 SCOUT_INTERVAL_MINUTES = int(os.getenv("SCOUT_INTERVAL_MINUTES", "30"))
 PORT = int(os.getenv("PORT", "8080"))
 
+# ── Optional Proxy Pool Rotation (e.g. Webshare 10 free proxies or custom) ───
+_RAW_PROXIES = [p.strip() for p in os.getenv("PROXY_POOL", "").split(",") if p.strip()]
+_proxy_index = 0
+_proxy_lock = threading.Lock()
+
+
+def get_next_proxy() -> str | None:
+    """Return next proxy in round-robin fashion, or None if no pool configured."""
+    global _proxy_index
+    if not _RAW_PROXIES:
+        return None
+    with _proxy_lock:
+        proxy = _RAW_PROXIES[_proxy_index % len(_RAW_PROXIES)]
+        _proxy_index += 1
+        return proxy
+
 
 # ── Render Health Check HTTP Server ───────────────────────────────────────────
 class ScoutHealthHandler(BaseHTTPRequestHandler):
@@ -115,8 +131,13 @@ def fetch_creator_reel_shortcodes(username: str) -> list[str]:
         "Sec-Fetch-Dest": "document",
     }
 
+    proxy = get_next_proxy()
+    proxies_dict = {"http": proxy, "https": proxy} if proxy else None
+    if proxy:
+        logger.info("Routing scrape @%s through proxy: %s", clean_user, proxy.split("@")[-1] if "@" in proxy else proxy)
+
     try:
-        r = requests.get(url, impersonate="chrome124", headers=headers, timeout=20)
+        r = requests.get(url, impersonate="chrome124", headers=headers, proxies=proxies_dict, timeout=20)
         if r.status_code != 200:
             logger.warning("Scrape @%s returned HTTP %s (profile might be private or rate limited)", clean_user, r.status_code)
             return []
@@ -160,6 +181,7 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
         return None
 
     url = f"https://www.instagram.com/reel/{shortcode}/"
+    proxy = get_next_proxy()
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -167,6 +189,8 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
         "socket_timeout": 15,
         "logger": SilentLogger(),
     }
+    if proxy:
+        ydl_opts["proxy"] = proxy
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
