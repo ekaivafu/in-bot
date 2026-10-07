@@ -67,6 +67,12 @@ from database import (
     remove_watchlist_creator,
     get_active_watchlist,
     get_pending_viral_reels,
+    get_user_scout_limit,
+    set_user_scout_limit,
+    get_user_watchlist,
+    get_user_watchlist_count,
+    add_user_watchlist_creator,
+    remove_user_watchlist_creator,
 )
 from downloader import (
     cleanup_session,
@@ -1368,11 +1374,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         cached = get_cached_media(shortcode)
         if cached and cached.get("video_file_id"):
             bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
-            video_cap = (
-                f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
-            )
+            cap_lines = [
+                f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                "━━━━━━━━━━━━━━━━━━━━",
+            ]
+            c_text = (cached.get("caption") or "").strip()
+            if c_text:
+                clean_cap = c_text[:700] + ("…" if len(c_text) > 700 else "")
+                cap_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
+                cap_lines.append("━━━━━━━━━━━━━━━━━━━━")
+            cap_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
+            video_cap = "\n".join(cap_lines)
+
             try:
                 await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
                 await context.bot.send_video(
@@ -1383,17 +1396,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     supports_streaming=True,
                     reply_markup=kb_video_actions(shortcode),
                 )
-                # Monospace Caption (clean, 1-tap copy, no promo below caption)
-                if cached.get("caption"):
-                    c_text = cached["caption"]
-                    chunks = [c_text[i : i + 3900] for i in range(0, len(c_text), 3900)]
-                    header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
-                    for chunk in chunks:
-                        await message.reply_text(
-                            f"{header}<code>{html.escape(chunk)}</code>",
-                            parse_mode=ParseMode.HTML,
-                        )
-                        header = ""
                 log_download(user.id, text, True)
                 logger.info("Instant cache hit | user=%s | shortcode=%s", user.id, shortcode)
                 return
@@ -1558,11 +1560,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # ── Case A: Video / Reel ──────────────────────────────────
                 if result.get("is_video", True) and video_path:
                     bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
-                    video_caption = (
-                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
-                        "━━━━━━━━━━━━━━━━━━━━\n"
-                        f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
-                    )
+                    cap_lines = [
+                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                        "━━━━━━━━━━━━━━━━━━━━",
+                    ]
+                    if caption_text and caption_text.strip():
+                        clean_cap = caption_text.strip()
+                        if len(clean_cap) > 700:
+                            clean_cap = clean_cap[:700] + "…"
+                        cap_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
+                        cap_lines.append("━━━━━━━━━━━━━━━━━━━━")
+                    cap_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
+                    video_caption = "\n".join(cap_lines)
+
                     sc = extract_shortcode(text) or ""
                     v_kb = kb_video_actions(sc) if sc else None
 
@@ -1585,11 +1595,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # ── Case B: Single Photo or Carousel ──────────────────────
                 elif image_paths:
                     bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
-                    media_caption = (
-                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}\n"
-                        "━━━━━━━━━━━━━━━━━━━━\n"
-                        f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>"
-                    )
+                    media_lines = [
+                        f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
+                        "━━━━━━━━━━━━━━━━━━━━",
+                    ]
+                    if caption_text and caption_text.strip():
+                        clean_cap = caption_text.strip()
+                        if len(clean_cap) > 700:
+                            clean_cap = clean_cap[:700] + "…"
+                        media_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
+                        media_lines.append("━━━━━━━━━━━━━━━━━━━━")
+                    media_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
+                    media_caption = "\n".join(media_lines)
+
                     if len(image_paths) == 1:
                         with open(image_paths[0], "rb") as pf:
                             await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_PHOTO)
@@ -1620,20 +1638,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                     f.close()
                                 except Exception:
                                     pass
-
-                # ── Monospace Caption (1-Tap Copy - NO PROMOTION BELOW CAPTION) ──
-                if caption_text:
-                    try:
-                        chunks = [caption_text[i : i + 3900] for i in range(0, len(caption_text), 3900)]
-                        header = f"{E_SPARKLES} <b>Caption</b> <i>(tap to copy):</i>\n\n"
-                        for chunk in chunks:
-                            await message.reply_text(
-                                f"{header}<code>{html.escape(chunk)}</code>",
-                                parse_mode=ParseMode.HTML,
-                            )
-                            header = ""
-                    except Exception as cap_err:
-                        logger.warning("Failed to send post caption: %s", cap_err)
 
                 log_download(user.id, text, True)
                 logger.info("DL done  | user=%s", user.id)
@@ -2203,6 +2207,15 @@ async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text += "\n".join(f"• @{html.escape(c)}" for c in creators) if creators else "<i>No creators added yet.</i>"
             await update.message.reply_html(text)
             return
+        elif subcmd == "limit" and len(args) > 2:
+            try:
+                target_uid = int(args[1])
+                lim = int(args[2])
+                set_user_scout_limit(target_uid, lim)
+                await update.message.reply_html(f"✅ <b>Limit for user <code>{target_uid}</code> set to {lim} slots!</b>")
+                return
+            except ValueError:
+                pass
 
     # Default /scout info overview
     creators = get_active_watchlist()
@@ -2227,8 +2240,146 @@ async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/scout add &lt;username&gt;</code> - Add target creator\n"
         "• <code>/scout remove &lt;username&gt;</code> - Remove creator\n"
         "• <code>/scout list</code> - Show all target creators\n"
+        "• <code>/setlimit &lt;user_id&gt; &lt;limit&gt;</code> - Set user limit\n"
     )
     await update.message.reply_html(text)
+
+
+# ── User Creator Watchlist Command ─────────────────────────────────────────────
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User command to manage personal creator watchlist (default 1 account)."""
+    user = update.effective_user
+    if not user:
+        return
+
+    admin_flag = is_admin(user.id)
+    user_limit = get_user_scout_limit(user.id)
+    my_creators = get_user_watchlist(user.id)
+    limit_str = "Unlimited 👑" if admin_flag else f"{user_limit}"
+
+    args = context.args
+    if args:
+        subcmd = args[0].lower()
+        if subcmd == "add" and len(args) > 1:
+            creator = args[1].strip().lstrip("@").lower()
+            success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag)
+            if success:
+                new_count = len(get_user_watchlist(user.id))
+                await update.message.reply_html(
+                    f"{E_CONFETTI} <b>Added @{html.escape(creator)} to your Watchlist!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 <b>Slots Used:</b> {new_count} / {limit_str}\n\n"
+                    f"🚀 <i>Whenever @{html.escape(creator)} posts a new viral reel (0–5 days, 5k+ likes), "
+                    f"it will be automatically downloaded, protected, and sent to you here!</i>"
+                )
+            elif reason == "limit_reached":
+                bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
+                await update.message.reply_html(
+                    f"🔒 <b>Watchlist Slot Limit Reached!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Your current plan allows monitoring <b>{user_limit}</b> creator account(s).\n"
+                    f"You have used all <b>{len(my_creators)}/{user_limit}</b> available slots.\n\n"
+                    f"💎 <b>Want to monitor more creators and get instant viral reels automatically?</b>\n"
+                    f"👉 Contact Admin to upgrade your slots and unlock multi-creator tracking!\n\n"
+                    f"<i>Tip: You can remove your current creator using <code>/watch remove {my_creators[0] if my_creators else 'username'}</code> to monitor a different one.</i>"
+                )
+            elif reason == "already_exists":
+                await update.message.reply_html(
+                    f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>"
+                )
+            else:
+                await update.message.reply_html(
+                    f"⚠️ <b>Could not add @{html.escape(creator)}. Please try again.</b>"
+                )
+            return
+
+        elif subcmd in ("del", "remove") and len(args) > 1:
+            creator = args[1].strip().lstrip("@").lower()
+            remove_user_watchlist_creator(user.id, creator)
+            await update.message.reply_html(
+                f"🗑️ <b>Removed @{html.escape(creator)} from your watchlist.</b>"
+            )
+            return
+
+    # Default /watch display
+    text = (
+        f"🎯 <b>Your Creator Watchlist</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>Active Slots:</b> {len(my_creators)} / {limit_str}\n\n"
+    )
+    if my_creators:
+        text += "<b>Monitored Creators:</b>\n"
+        text += "\n".join(f"  • @{html.escape(c)}" for c in my_creators) + "\n\n"
+    else:
+        text += "<i>You are not monitoring any creators yet.</i>\n\n"
+
+    text += (
+        "<b>Commands:</b>\n"
+        "• <code>/watch add &lt;username&gt;</code> - Monitor a creator\n"
+        "• <code>/watch remove &lt;username&gt;</code> - Stop monitoring\n\n"
+        f"💡 <i>Free users can monitor 1 creator at a time. Contact Admin to unlock more slots!</i>"
+    )
+    await update.message.reply_html(text)
+
+
+# ── Admin Slot Limit Commands ──────────────────────────────────────────────────
+async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Set creator slot limit for any user (/setlimit <user_id> <limit>)."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_html(
+            "<b>Usage:</b> <code>/setlimit &lt;user_id&gt; &lt;limit&gt;</code>\n"
+            "Example: <code>/setlimit 123456789 5</code>"
+        )
+        return
+
+    try:
+        target_uid = int(args[0])
+        limit_val = int(args[1])
+    except ValueError:
+        await update.message.reply_html("⚠️ User ID and limit must be numbers.")
+        return
+
+    success = set_user_scout_limit(target_uid, limit_val)
+    if success:
+        await update.message.reply_html(
+            f"✅ <b>Slot Limit Updated!</b>\n"
+            f"User ID: <code>{target_uid}</code>\n"
+            f"New Creator Limit: <b>{limit_val}</b> creator slots"
+        )
+    else:
+        await update.message.reply_html("⚠️ Failed to update limit in database.")
+
+
+async def cmd_getlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Check user creator slot limit (/getlimit <user_id>)."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_html("<b>Usage:</b> <code>/getlimit &lt;user_id&gt;</code>")
+        return
+
+    try:
+        target_uid = int(args[0])
+    except ValueError:
+        await update.message.reply_html("⚠️ User ID must be a number.")
+        return
+
+    limit_val = get_user_scout_limit(target_uid)
+    monitored = get_user_watchlist(target_uid)
+    await update.message.reply_html(
+        f"👤 <b>User Watchlist Info</b>\n"
+        f"User ID: <code>{target_uid}</code>\n"
+        f"Limit: <b>{limit_val}</b> slots\n"
+        f"Monitored ({len(monitored)}): {', '.join('@' + c for c in monitored) if monitored else 'None'}"
+    )
 
 
 # ── Error handler ──────────────────────────────────────────────────────────────
@@ -2333,6 +2484,9 @@ def main() -> None:
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
     app.add_handler(CommandHandler("setlink",    cmd_setlink))
     app.add_handler(CommandHandler("scout",      cmd_scout))
+    app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
+    app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
+    app.add_handler(CommandHandler("getlimit",   cmd_getlimit))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

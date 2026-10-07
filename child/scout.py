@@ -62,6 +62,7 @@ TARGET_CHAT_ID = os.getenv("SCOUT_TARGET_CHAT", ADMIN_ID).strip()
 MIN_LIKES = int(os.getenv("MIN_LIKES", "5000"))
 MAX_AGE_DAYS = float(os.getenv("MAX_AGE_DAYS", "5.0"))
 SCOUT_INTERVAL_MINUTES = int(os.getenv("SCOUT_INTERVAL_MINUTES", "30"))
+CREATOR_GAP_SECONDS = int(os.getenv("CREATOR_GAP_SECONDS", "300"))  # Minimum 5-minute gap between accounts
 PORT = int(os.getenv("PORT", "8080"))
 
 # ── Optional Proxy Pool Rotation (e.g. Webshare 10 free proxies or custom) ───
@@ -335,7 +336,32 @@ async def process_viral_reel(reel_data: dict, bot_token: str, chat_id: int | str
 
     logger.info("🎉 Video uploaded successfully! Telegram file_id: %s", file_id[:25] + "...")
 
-    # 3. Store in database: media_cache, scout_queue, and scout_seen_reels
+    # 3. Auto-dispatch to all user subscribers of this creator in 1 single message
+    subscribers = database.get_subscribers_for_creator(creator)
+    admin_id_int = int(chat_id) if str(chat_id).lstrip("-").isdigit() else 0
+    for sub_id in subscribers:
+        if sub_id != admin_id_int:
+            try:
+                user_cap = (
+                    f"🎯 <b>Viral Reel from @{creator}!</b>\n\n"
+                    f"❤️ <b>Likes:</b> {likes:,}\n"
+                    f"📅 <b>Age:</b> {age_days:.1f} days old ({upload_date})\n"
+                    f"🔗 <a href='{url}'>Original Instagram Reel</a>\n\n"
+                    f"✨ <i>Auto-delivered from your Watchlist!</i>"
+                )
+                async with telegram.Bot(token=bot_token, request=t_request) as sub_bot:
+                    await sub_bot.send_video(
+                        chat_id=sub_id,
+                        video=file_id,
+                        caption=user_cap,
+                        parse_mode=telegram.constants.ParseMode.HTML,
+                        supports_streaming=True,
+                    )
+                logger.info("Auto-dispatched reel %s to subscriber %s", shortcode, sub_id)
+            except Exception as e_sub:
+                logger.warning("Could not dispatch to subscriber %s: %s", sub_id, e_sub)
+
+    # 4. Store in database: media_cache, scout_queue, and scout_seen_reels
     database.set_cached_media(shortcode=shortcode, video_file_id=file_id, caption=caption)
     database.enqueue_viral_reel(shortcode=shortcode, creator=creator, likes=likes, video_file_id=file_id, caption=caption)
     database.record_seen_reel(shortcode=shortcode, creator=creator, likes=likes, posted_date=upload_date, status="viral_enqueued")
@@ -344,9 +370,10 @@ async def process_viral_reel(reel_data: dict, bot_token: str, chat_id: int | str
 
 
 # ── Scout Engine Cycle ─────────────────────────────────────────────────────────
-async def run_scout_cycle() -> int:
+async def run_scout_cycle(enforce_gap: bool = True) -> int:
     """
     Executes a complete inspection across all active creators in the watchlist.
+    Enforces a minimum 5-minute gap (CREATOR_GAP_SECONDS) between creators for safe, rate-limit-proof pacing.
     Returns total count of new viral reels processed.
     """
     creators = database.get_active_watchlist()
@@ -366,8 +393,8 @@ async def run_scout_cycle() -> int:
     logger.info("=== Starting Scout Cycle for %d creators: %s ===", len(creators), ", ".join(f"@{c}" for c in creators))
     viral_found_count = 0
 
-    for creator in creators:
-        logger.info("--- Inspecting creator: @%s ---", creator)
+    for idx, creator in enumerate(creators, 1):
+        logger.info("--- Inspecting creator (%d/%d): @%s ---", idx, len(creators), creator)
         shortcodes = fetch_creator_reel_shortcodes(creator)
 
         for sc in shortcodes:
@@ -386,8 +413,10 @@ async def run_scout_cycle() -> int:
             # Polite jitter between live reel queries to stay undetected
             await asyncio.sleep(random.uniform(1.5, 3.5))
 
-        # Polite jitter between creator profile scrapes
-        await asyncio.sleep(random.uniform(3.0, 6.0))
+        # 5-minute minimum pacing gap between different creators
+        if enforce_gap and idx < len(creators):
+            logger.info("⏳ Pacing: Waiting %d seconds (5 min) before inspecting next creator...", CREATOR_GAP_SECONDS)
+            await asyncio.sleep(CREATOR_GAP_SECONDS)
 
     logger.info("=== Scout Cycle Complete: %d new viral reels processed ===", viral_found_count)
     return viral_found_count
@@ -430,7 +459,7 @@ def main():
 
     if args.once:
         logger.info("Running single scout operation (--once)...")
-        found = asyncio.run(run_scout_cycle())
+        found = asyncio.run(run_scout_cycle(enforce_gap=False))
         logger.info("One-shot run finished. Found %d viral reels.", found)
         sys.exit(0)
 

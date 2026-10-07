@@ -298,6 +298,19 @@ def init_db() -> None:
                             created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                             dispatched    BOOLEAN DEFAULT FALSE
                         );
+
+                        CREATE TABLE IF NOT EXISTS user_watchlist (
+                            id         SERIAL PRIMARY KEY,
+                            user_id    BIGINT NOT NULL,
+                            username   TEXT NOT NULL,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            UNIQUE(user_id, username)
+                        );
+
+                        CREATE TABLE IF NOT EXISTS user_scout_limits (
+                            user_id      BIGINT PRIMARY KEY,
+                            custom_limit INTEGER NOT NULL DEFAULT 1
+                        );
                     """)
 
                     # Check if migration needed
@@ -392,6 +405,19 @@ def init_db() -> None:
                     caption       TEXT DEFAULT '',
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                     dispatched    INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS user_watchlist (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL,
+                    username   TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(user_id, username)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_scout_limits (
+                    user_id      INTEGER PRIMARY KEY,
+                    custom_limit INTEGER NOT NULL DEFAULT 1
                 );
             """)
             _load_caches(cur)
@@ -950,4 +976,159 @@ def mark_viral_reel_dispatched(queue_id: int) -> None:
             cur.execute(f"UPDATE scout_queue SET dispatched = {dispatched_val} WHERE id = {placeholder}", (queue_id,))
     except Exception as exc:
         logger.warning("mark_viral_reel_dispatched error for id %s: %s", queue_id, exc)
+
+
+# ── User Watchlist & Limit Management ──────────────────────────────────────────
+def get_user_scout_limit(user_id: int) -> int:
+    """Get max creator watchlist slots for a user (default 1)."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT custom_limit FROM user_scout_limits WHERE user_id = {placeholder}", (user_id,))
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 1
+    except Exception as exc:
+        logger.warning("get_user_scout_limit error for %s: %s", user_id, exc)
+        return 1
+
+
+def set_user_scout_limit(user_id: int, limit: int) -> bool:
+    """Admin function: Set max creator slots for a specific user."""
+    if limit < 1:
+        limit = 1
+    try:
+        with get_db_cursor() as cur:
+            if USE_POSTGRES:
+                cur.execute(
+                    """
+                    INSERT INTO user_scout_limits (user_id, custom_limit)
+                    VALUES (%s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET custom_limit = EXCLUDED.custom_limit
+                    """,
+                    (user_id, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO user_scout_limits (user_id, custom_limit)
+                    VALUES (?, ?)
+                    ON CONFLICT (user_id) DO UPDATE SET custom_limit = excluded.custom_limit
+                    """,
+                    (user_id, limit),
+                )
+        return True
+    except Exception as exc:
+        logger.warning("set_user_scout_limit error for %s: %s", user_id, exc)
+        return False
+
+
+def get_user_watchlist(user_id: int) -> list[str]:
+    """Retrieve all creator usernames actively tracked by a specific user."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"SELECT username FROM user_watchlist WHERE user_id = {placeholder} ORDER BY id ASC",
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            return [r[0] for r in rows if r and r[0]]
+    except Exception as exc:
+        logger.warning("get_user_watchlist error for %s: %s", user_id, exc)
+        return []
+
+
+def get_user_watchlist_count(user_id: int) -> int:
+    """Return count of creators monitored by user."""
+    return len(get_user_watchlist(user_id))
+
+
+def add_user_watchlist_creator(user_id: int, username: str, is_admin_user: bool = False) -> tuple[bool, str]:
+    """
+    Add a creator to a user's watchlist with slot limit enforcement.
+    Returns:
+      (True, "added")           - Successfully added
+      (False, "limit_reached")  - User hit their slot limit (default 1)
+      (False, "already_exists") - Already on user's list
+      (False, "error")          - Database / validation error
+    """
+    clean_user = username.strip().lstrip("@").lower()
+    if not clean_user or not user_id:
+        return False, "invalid"
+
+    # Enforce slot limit (admin has unlimited slots)
+    if not is_admin_user:
+        user_limit = get_user_scout_limit(user_id)
+        current_count = get_user_watchlist_count(user_id)
+        if current_count >= user_limit:
+            return False, "limit_reached"
+
+    # Check if already in user's list
+    existing = get_user_watchlist(user_id)
+    if clean_user in existing:
+        return False, "already_exists"
+
+    try:
+        # 1. Insert into user_watchlist
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"INSERT INTO user_watchlist (user_id, username) VALUES ({placeholder}, {placeholder})",
+                (user_id, clean_user),
+            )
+
+        # 2. Ensure creator is active in global scout creator_watchlist
+        add_watchlist_creator(clean_user, added_by=user_id)
+        return True, "added"
+    except Exception as exc:
+        logger.warning("add_user_watchlist_creator error for user %s, creator %s: %s", user_id, clean_user, exc)
+        return False, "error"
+
+
+def remove_user_watchlist_creator(user_id: int, username: str) -> bool:
+    """Remove a creator from user's watchlist. Deactivates from scout if 0 other users track it."""
+    clean_user = username.strip().lstrip("@").lower()
+    if not clean_user or not user_id:
+        return False
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"DELETE FROM user_watchlist WHERE user_id = {placeholder} AND username = {placeholder}",
+                (user_id, clean_user),
+            )
+
+            # Check if any other users still track this creator
+            cur.execute(
+                f"SELECT 1 FROM user_watchlist WHERE username = {placeholder} LIMIT 1",
+                (clean_user,),
+            )
+            has_others = cur.fetchone() is not None
+            if not has_others:
+                remove_watchlist_creator(clean_user)
+
+        return True
+    except Exception as exc:
+        logger.warning("remove_user_watchlist_creator error: %s", exc)
+        return False
+
+
+def get_subscribers_for_creator(creator: str) -> list[int]:
+    """Retrieve all user IDs monitoring a specific creator."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if not clean_user:
+        return []
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"SELECT DISTINCT user_id FROM user_watchlist WHERE username = {placeholder}",
+                (clean_user,),
+            )
+            rows = cur.fetchall()
+            return [int(r[0]) for r in rows if r and r[0]]
+    except Exception as exc:
+        logger.warning("get_subscribers_for_creator error for %s: %s", clean_user, exc)
+        return []
+
 
