@@ -73,7 +73,14 @@ from database import (
     get_user_watchlist_count,
     add_user_watchlist_creator,
     remove_user_watchlist_creator,
+    add_child_server,
+    remove_child_server,
+    get_child_server,
+    get_active_child_servers,
+    rebalance_creator_workload,
+    get_cluster_status,
 )
+import cloud_manager
 from downloader import (
     cleanup_session,
     download_instagram,
@@ -2241,6 +2248,10 @@ async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• <code>/scout remove &lt;username&gt;</code> - Remove creator\n"
         "• <code>/scout list</code> - Show all target creators\n"
         "• <code>/setlimit &lt;user_id&gt; &lt;limit&gt;</code> - Set user limit\n"
+        "• <code>/cluster</code> - View multi-server cluster & load balance\n"
+        "• <code>/deploy_child &lt;render_api_key&gt;</code> - 1-Click auto deploy child server\n"
+        "• <code>/addserver &lt;url&gt; [name]</code> - Add existing child server\n"
+        "• <code>/rebalance</code> - Rebalance creators evenly across servers\n"
     )
     await update.message.reply_html(text)
 
@@ -2382,6 +2393,317 @@ async def cmd_getlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+# ── Admin Multi-Server Cluster & Workload Distribution ─────────────────────────
+async def cmd_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: View child worker cluster status, URLs, UptimeRobot, and creator workload distribution."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    status = get_cluster_status()
+    servers = status["servers"]
+    total_creators = status["total_creators"]
+    unassigned = status["unassigned"]
+
+    lines = [
+        "⚡ <b>Child Server Cluster & Load Balancing</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🖥️ <b>Active Servers:</b> {len(servers)}",
+        f"👥 <b>Total Monitored Creators:</b> {total_creators}\n",
+    ]
+
+    if not servers:
+        lines.append("<i>No child servers registered. Workers operate in standalone mode.</i>\n")
+        lines.append("💡 <i>Use <code>/addserver &lt;url&gt; [name]</code> or <code>/deploy_child &lt;render_api_key&gt;</code> to register a child server!</i>\n")
+    else:
+        for s in servers:
+            c_list = s["creators"]
+            count = len(c_list)
+            pct = f"({count/total_creators*100:.0f}%)" if total_creators > 0 else ""
+            uptime_info = f"✅ Monitored (ID: <code>{s['uptimerobot_id']}</code>)" if s["uptimerobot_id"] else "⚠️ No UptimeRobot ID"
+            c_str = ", ".join(f"@{c}" for c in c_list) if c_list else "<i>None assigned</i>"
+            lines.append(
+                f"<b>Server #{s['id']}: {html.escape(s['name'])}</b>\n"
+                f"  🔗 URL: <code>{html.escape(s['url'] or 'N/A')}</code>\n"
+                f"  🤖 Uptime: {uptime_info}\n"
+                f"  📊 Assigned Workload: <b>{count} creators</b> {pct}\n"
+                f"  👥 Accounts: {c_str}\n"
+            )
+
+        if unassigned:
+            lines.append(f"⚠️ <b>Unassigned Creators ({len(unassigned)}):</b> {', '.join('@'+c for c in unassigned)}")
+            lines.append("<i>Run <code>/rebalance</code> to distribute unassigned creators evenly.</i>\n")
+
+    lines.append(
+        "<b>Cluster Management Commands:</b>\n"
+        "• <code>/deploy_child &lt;render_api_key&gt;</code> - 1-Click auto deploy & connect\n"
+        "• <code>/addserver &lt;url&gt; [name]</code> - Register existing child server\n"
+        "• <code>/delserver &lt;server_id&gt;</code> - Remove server & rebalance\n"
+        "• <code>/rebalance</code> - Rebalance creators evenly across servers"
+    )
+    await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
+
+
+async def cmd_addserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Manually register a child server URL and rebalance creators evenly."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_html(
+            "<b>Usage:</b> <code>/addserver &lt;server_url&gt; [server_name]</code>\n\n"
+            "Example:\n"
+            "<code>/addserver https://instabot-worker-2.onrender.com Worker2</code>"
+        )
+        return
+
+    url = args[0].strip()
+    name = " ".join(args[1:]).strip() if len(args) > 1 else f"Worker-{int(time.time()) % 1000}"
+
+    # Auto-create UptimeRobot keep-alive monitor if API key configured
+    uptimerobot_id = ""
+    uptime_note = ""
+    if os.getenv("UPTIMEROBOT_API_KEY", "").strip():
+        ok_uptime, res_uptime = cloud_manager.create_uptimerobot_monitor(
+            server_url=url,
+            friendly_name=name,
+        )
+        if ok_uptime:
+            uptimerobot_id = res_uptime
+            uptime_note = f"✅ UptimeRobot 24/7 Keep-Alive Monitor created (ID: <code>{uptimerobot_id}</code>)"
+        else:
+            uptime_note = f"⚠️ UptimeRobot monitor skipped: {res_uptime}"
+    else:
+        uptime_note = "ℹ️ UptimeRobot monitor not created (UPTIMEROBOT_API_KEY not set in .env)"
+
+    # Register in DB and automatically rebalance workload!
+    server_id = add_child_server(
+        name=name,
+        url=url,
+        uptimerobot_id=uptimerobot_id,
+    )
+
+    if server_id:
+        status = get_cluster_status()
+        servers = status["servers"]
+        breakdown = "\n".join(
+            f"  • <b>{html.escape(s['name'])}</b> (ID: {s['id']}): <b>{len(s['creators'])} creators</b>"
+            for s in servers
+        )
+        await update.message.reply_html(
+            f"🎉 <b>Child Server #{server_id} Added & Rebalanced!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🖥️ <b>Name:</b> {html.escape(name)}\n"
+            f"🔗 <b>URL:</b> <code>{html.escape(url)}</code>\n"
+            f"{uptime_note}\n\n"
+            f"⚖️ <b>Even Workload Division:</b>\n"
+            f"{breakdown}\n\n"
+            f"🚀 <i>All {status['total_creators']} creators are now evenly distributed across your {len(servers)} servers!</i>",
+            disable_web_page_preview=True,
+        )
+    else:
+        await update.message.reply_html("⚠️ Failed to register server in database.")
+
+
+async def cmd_delserver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Remove child server, delete UptimeRobot monitor, and rebalance remaining servers."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_html("<b>Usage:</b> <code>/delserver &lt;server_id&gt;</code>")
+        return
+
+    try:
+        server_id = int(args[0])
+    except ValueError:
+        await update.message.reply_html("⚠️ Server ID must be a number.")
+        return
+
+    server_info = get_child_server(server_id)
+    if not server_info:
+        await update.message.reply_html(f"⚠️ Server #{server_id} not found.")
+        return
+
+    # Delete UptimeRobot monitor if existed
+    if server_info.get("uptimerobot_id"):
+        cloud_manager.delete_uptimerobot_monitor(server_info["uptimerobot_id"])
+
+    success = remove_child_server(server_id)
+    if success:
+        status = get_cluster_status()
+        servers = status["servers"]
+        breakdown = "\n".join(
+            f"  • <b>{html.escape(s['name'])}</b> (ID: {s['id']}): <b>{len(s['creators'])} creators</b>"
+            for s in servers
+        ) if servers else "<i>No remaining child servers. Running standalone.</i>"
+
+        await update.message.reply_html(
+            f"🗑️ <b>Server #{server_id} ({html.escape(server_info['name'])}) Removed!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚖️ <b>Workload Rebalanced Across Remaining Servers:</b>\n"
+            f"{breakdown}",
+            disable_web_page_preview=True,
+        )
+    else:
+        await update.message.reply_html(f"⚠️ Failed to remove server #{server_id}.")
+
+
+async def cmd_rebalance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Force recalculate and evenly rebalance creators across all active child servers."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    dist = rebalance_creator_workload()
+    status = get_cluster_status()
+    servers = status["servers"]
+
+    if not servers:
+        await update.message.reply_html(
+            "ℹ️ No active child servers found. Creators unassigned (standalone mode)."
+        )
+        return
+
+    breakdown = "\n".join(
+        f"  • <b>{html.escape(s['name'])}</b> (ID: {s['id']}): <b>{len(s['creators'])} creators</b>\n"
+        f"    Accounts: {', '.join('@'+c for c in s['creators']) if s['creators'] else 'None'}"
+        for s in servers
+    )
+    await update.message.reply_html(
+        f"⚖️ <b>Cluster Workload Rebalanced!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total Active Creators: <b>{status['total_creators']}</b>\n"
+        f"Active Servers: <b>{len(servers)}</b>\n\n"
+        f"{breakdown}",
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_deploy_child(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: 1-Click auto deploy child worker on Render and register in cluster."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_html(
+            "🚀 <b>Automated Render Child Deployer</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Deploys a new child worker web service on Render automatically using Render API!\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/deploy_child &lt;render_api_key&gt;</code>\n\n"
+            "📌 <b>How to get your Render API Key:</b>\n"
+            "1. Go to <a href=\"https://dashboard.render.com/u/settings#api-keys\">Render Account Settings → API Keys</a>\n"
+            "2. Click <b>Create API Key</b>\n"
+            "3. Copy the key and run: <code>/deploy_child rnd_xxxxxx</code>\n\n"
+            f"🌐 <i>GitHub Repo URL from .env: <code>{html.escape(os.getenv('GITHUB_REPO_URL', 'Not set'))}</code></i>",
+            disable_web_page_preview=True,
+        )
+        return
+
+    render_api_key = args[0].strip()
+    repo_url = os.getenv("GITHUB_REPO_URL", "").strip()
+    if len(args) > 1:
+        repo_url = args[1].strip()
+
+    if not repo_url:
+        await update.message.reply_html(
+            "⚠️ <b>Missing GITHUB_REPO_URL!</b>\n\n"
+            "Please add your repository URL in <code>.env</code>:\n"
+            "<code>GITHUB_REPO_URL=https://github.com/yourusername/instabot</code>\n"
+            "Or pass it directly:\n"
+            "<code>/deploy_child &lt;render_api_key&gt; &lt;github_repo_url&gt;</code>"
+        )
+        return
+
+    progress_msg = await update.message.reply_html(
+        "⏳ <b>Provisioning Child Worker on Render...</b>\n"
+        "Connecting to Render API, setting up Python web service & environment variables..."
+    )
+
+    # Calculate next worker ID
+    active_servers = get_active_child_servers()
+    next_worker_id = len(active_servers) + 1
+
+    db_url = os.getenv("DATABASE_URL", "").strip()
+    bot_tok = BOT_TOKEN
+    admin_id_str = ADMIN_ID
+
+    ok, res = await asyncio.to_thread(
+        cloud_manager.deploy_render_child_service,
+        render_api_key=render_api_key,
+        repo_url=repo_url,
+        db_url=db_url,
+        bot_token=bot_tok,
+        admin_id=admin_id_str,
+        worker_id=next_worker_id,
+        service_name=f"instabot-scout-{next_worker_id}",
+    )
+
+    if not ok:
+        await progress_msg.edit_text(
+            f"❌ <b>Render Deployment Failed:</b>\n\n<code>{html.escape(str(res))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    service_id = res.get("service_id", "")
+    srv_url = res.get("url", "")
+    srv_name = res.get("name", f"Worker-{next_worker_id}")
+
+    # UptimeRobot monitor
+    uptimerobot_id = ""
+    uptime_note = ""
+    if os.getenv("UPTIMEROBOT_API_KEY", "").strip():
+        ok_uptime, res_uptime = await asyncio.to_thread(
+            cloud_manager.create_uptimerobot_monitor,
+            server_url=srv_url,
+            friendly_name=srv_name,
+        )
+        if ok_uptime:
+            uptimerobot_id = res_uptime
+            uptime_note = f"✅ UptimeRobot 24/7 Monitor created (ID: <code>{uptimerobot_id}</code>)"
+        else:
+            uptime_note = f"⚠️ UptimeRobot monitor skipped: {res_uptime}"
+    else:
+        uptime_note = "ℹ️ UptimeRobot monitor not created (UPTIMEROBOT_API_KEY not configured in .env)"
+
+    # Save in DB and rebalance workload
+    server_id = add_child_server(
+        name=srv_name,
+        render_service_id=service_id,
+        url=srv_url,
+        uptimerobot_id=uptimerobot_id,
+    )
+
+    status = get_cluster_status()
+    servers = status["servers"]
+    breakdown = "\n".join(
+        f"  • <b>{html.escape(s['name'])}</b> (ID: {s['id']}): <b>{len(s['creators'])} creators</b>"
+        for s in servers
+    )
+
+    await progress_msg.edit_text(
+        f"🎉 <b>Render Child Worker #{server_id} Deployed Successfully!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🖥️ <b>Service Name:</b> {html.escape(srv_name)}\n"
+        f"🆔 <b>Render Service ID:</b> <code>{service_id}</code>\n"
+        f"🔗 <b>Worker URL:</b> <code>{html.escape(srv_url)}</code>\n"
+        f"{uptime_note}\n\n"
+        f"⚖️ <b>Even Workload Division Across Cluster:</b>\n"
+        f"{breakdown}\n\n"
+        f"✨ <i>Worker #{server_id} will be live in 1-2 minutes and automatically scout its assigned creators!</i>",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
 # ── Error handler ──────────────────────────────────────────────────────────────
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Unhandled exception: %s", context.error, exc_info=True)
@@ -2487,6 +2809,11 @@ def main() -> None:
     app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
     app.add_handler(CommandHandler("getlimit",   cmd_getlimit))
+    app.add_handler(CommandHandler(["cluster", "servers"], cmd_cluster))
+    app.add_handler(CommandHandler("deploy_child", cmd_deploy_child))
+    app.add_handler(CommandHandler("addserver",    cmd_addserver))
+    app.add_handler(CommandHandler("delserver",    cmd_delserver))
+    app.add_handler(CommandHandler("rebalance",    cmd_rebalance))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

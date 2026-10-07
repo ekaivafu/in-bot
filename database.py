@@ -311,6 +311,18 @@ def init_db() -> None:
                             user_id      BIGINT PRIMARY KEY,
                             custom_limit INTEGER NOT NULL DEFAULT 1
                         );
+
+                        CREATE TABLE IF NOT EXISTS child_servers (
+                            id                SERIAL PRIMARY KEY,
+                            name              TEXT NOT NULL,
+                            render_service_id TEXT DEFAULT '',
+                            url               TEXT DEFAULT '',
+                            uptimerobot_id    TEXT DEFAULT '',
+                            active            BOOLEAN DEFAULT TRUE,
+                            created_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
+
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER DEFAULT NULL;
                     """)
 
                     # Check if migration needed
@@ -419,7 +431,22 @@ def init_db() -> None:
                     user_id      INTEGER PRIMARY KEY,
                     custom_limit INTEGER NOT NULL DEFAULT 1
                 );
+
+                CREATE TABLE IF NOT EXISTS child_servers (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name              TEXT NOT NULL,
+                    render_service_id TEXT DEFAULT '',
+                    url               TEXT DEFAULT '',
+                    uptimerobot_id    TEXT DEFAULT '',
+                    active            INTEGER DEFAULT 1,
+                    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+                );
             """)
+
+            try:
+                cur.execute("ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL")
+            except Exception:
+                pass
             _load_caches(cur)
         logger.info("Database initialized (SQLite mode with in-memory caching)")
 
@@ -796,7 +823,7 @@ def update_cached_audio(shortcode: str, audio_file_id: str) -> None:
 
 # ── Scout & Watchlist Helpers (for Child Worker) ──────────────────────────────
 def add_watchlist_creator(username: str, added_by: int = 0) -> bool:
-    """Add a creator username to the scout watchlist."""
+    """Add a creator username to the scout watchlist and assign to least-loaded worker."""
     clean_user = username.strip().lstrip("@").lower()
     if not clean_user:
         return False
@@ -821,7 +848,9 @@ def add_watchlist_creator(username: str, added_by: int = 0) -> bool:
                     """,
                     (clean_user, added_by),
                 )
-            return True
+        # Assign to least-loaded child server if cluster is active
+        assign_creator_to_least_loaded_worker(clean_user)
+        return True
     except Exception as exc:
         logger.warning("add_watchlist_creator error for %s: %s", clean_user, exc)
         return False
@@ -834,9 +863,10 @@ def remove_watchlist_creator(username: str) -> bool:
         return False
     try:
         placeholder = "%s" if USE_POSTGRES else "?"
+        inactive_val = "FALSE" if USE_POSTGRES else "0"
         with get_db_cursor() as cur:
             cur.execute(
-                f"UPDATE creator_watchlist SET active = {('FALSE' if USE_POSTGRES else '0')} WHERE username = {placeholder}",
+                f"UPDATE creator_watchlist SET active = {inactive_val}, assigned_worker_id = NULL WHERE username = {placeholder}",
                 (clean_user,),
             )
             return True
@@ -1130,5 +1160,309 @@ def get_subscribers_for_creator(creator: str) -> list[int]:
     except Exception as exc:
         logger.warning("get_subscribers_for_creator error for %s: %s", clean_user, exc)
         return []
+
+
+# ── Multi-Server Cluster & Workload Load-Balancing ─────────────────────────────
+def add_child_server(name: str, render_service_id: str = "", url: str = "", uptimerobot_id: str = "") -> int:
+    """Registers a child server. Automatically rebalances creators evenly across cluster."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        clean_url = url.strip().rstrip("/")
+        clean_name = name.strip() or "Worker"
+        with get_db_cursor() as cur:
+            if USE_POSTGRES:
+                cur.execute(
+                    """
+                    INSERT INTO child_servers (name, render_service_id, url, uptimerobot_id, active)
+                    VALUES (%s, %s, %s, %s, TRUE)
+                    RETURNING id
+                    """,
+                    (clean_name, render_service_id.strip(), clean_url, str(uptimerobot_id).strip()),
+                )
+                server_id = cur.fetchone()[0]
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO child_servers (name, render_service_id, url, uptimerobot_id, active)
+                    VALUES (?, ?, ?, ?, 1)
+                    """,
+                    (clean_name, render_service_id.strip(), clean_url, str(uptimerobot_id).strip()),
+                )
+                server_id = cur.lastrowid
+
+        # Immediately divide existing accounts evenly across all servers (e.g. 10 -> 5-5)
+        rebalance_creator_workload()
+        return int(server_id)
+    except Exception as exc:
+        logger.warning("add_child_server error: %s", exc)
+        return 0
+
+
+def remove_child_server(server_id: int) -> bool:
+    """Deactivates a child server and evenly rebalances creators across remaining servers."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        inactive_val = "FALSE" if USE_POSTGRES else "0"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"UPDATE child_servers SET active = {inactive_val} WHERE id = {placeholder}",
+                (server_id,),
+            )
+            cur.execute(
+                f"UPDATE creator_watchlist SET assigned_worker_id = NULL WHERE assigned_worker_id = {placeholder}",
+                (server_id,),
+            )
+        # Redistribute unassigned creators across active servers
+        rebalance_creator_workload()
+        return True
+    except Exception as exc:
+        logger.warning("remove_child_server error for %s: %s", server_id, exc)
+        return False
+
+
+def get_child_server(server_id: int) -> dict | None:
+    """Retrieve details of a specific child server."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"SELECT id, name, render_service_id, url, uptimerobot_id, active FROM child_servers WHERE id = {placeholder}",
+                (server_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "name": row[1],
+                "render_service_id": row[2],
+                "url": row[3],
+                "uptimerobot_id": row[4],
+                "active": bool(row[5]),
+            }
+    except Exception as exc:
+        logger.warning("get_child_server error for %s: %s", server_id, exc)
+        return None
+
+
+def get_active_child_servers() -> list[dict]:
+    """Retrieve all active child servers."""
+    try:
+        active_val = "TRUE" if USE_POSTGRES else "1"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"SELECT id, name, render_service_id, url, uptimerobot_id, created_at FROM child_servers WHERE active = {active_val} ORDER BY id ASC"
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "render_service_id": r[2],
+                    "url": r[3],
+                    "uptimerobot_id": r[4],
+                    "created_at": str(r[5]),
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("get_active_child_servers error: %s", exc)
+        return []
+
+
+def update_child_server_uptime(server_id: int, uptimerobot_id: str) -> bool:
+    """Save UptimeRobot monitor ID to server."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"UPDATE child_servers SET uptimerobot_id = {placeholder} WHERE id = {placeholder}",
+                (str(uptimerobot_id).strip(), server_id),
+            )
+        return True
+    except Exception as exc:
+        logger.warning("update_child_server_uptime error for %s: %s", server_id, exc)
+        return False
+
+
+def rebalance_creator_workload() -> dict[int, list[str]]:
+    """
+    Evenly redistributes all active creators round-robin across all active child servers.
+    Example: 10 creators across 2 servers -> 5-5
+             10 creators across 3 servers -> 4-3-3
+    Returns mapping of {server_id: [usernames]}
+    """
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        active_val = "TRUE" if USE_POSTGRES else "1"
+        with get_db_cursor() as cur:
+            # 1. Fetch active servers
+            cur.execute(f"SELECT id FROM child_servers WHERE active = {active_val} ORDER BY id ASC")
+            servers = [int(r[0]) for r in cur.fetchall() if r and r[0]]
+
+            # 2. Fetch active creators
+            cur.execute(f"SELECT username FROM creator_watchlist WHERE active = {active_val} ORDER BY id ASC")
+            creators = [r[0] for r in cur.fetchall() if r and r[0]]
+
+            if not servers:
+                # No child servers: unassign all (workers operate standalone)
+                cur.execute(f"UPDATE creator_watchlist SET assigned_worker_id = NULL WHERE active = {active_val}")
+                return {}
+
+            distribution: dict[int, list[str]] = {s: [] for s in servers}
+            k = len(servers)
+
+            for i, creator in enumerate(creators):
+                target_server = servers[i % k]
+                distribution[target_server].append(creator)
+                cur.execute(
+                    f"UPDATE creator_watchlist SET assigned_worker_id = {placeholder} WHERE username = {placeholder}",
+                    (target_server, creator),
+                )
+
+            logger.info("Rebalanced %d creators across %d child servers: %s",
+                        len(creators), k, {sid: len(c_list) for sid, c_list in distribution.items()})
+            return distribution
+    except Exception as exc:
+        logger.warning("rebalance_creator_workload error: %s", exc)
+        return {}
+
+
+def assign_creator_to_least_loaded_worker(username: str) -> int | None:
+    """
+    Assigns a creator to the active child server with the lowest count of assigned creators.
+    Ensures wise round-robin / minimum-load allocation as new accounts are added.
+    """
+    clean_user = username.strip().lstrip("@").lower()
+    if not clean_user:
+        return None
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        active_val = "TRUE" if USE_POSTGRES else "1"
+        with get_db_cursor() as cur:
+            # Check if this creator is already assigned to a valid active server
+            cur.execute(
+                f"""
+                SELECT cw.assigned_worker_id 
+                FROM creator_watchlist cw
+                JOIN child_servers cs ON cs.id = cw.assigned_worker_id
+                WHERE cw.username = {placeholder} AND cs.active = {active_val}
+                LIMIT 1
+                """,
+                (clean_user,),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+
+            # Get active servers
+            cur.execute(f"SELECT id FROM child_servers WHERE active = {active_val} ORDER BY id ASC")
+            servers = [int(r[0]) for r in cur.fetchall() if r and r[0]]
+            if not servers:
+                return None
+
+            # Count assigned active creators for each active server
+            server_counts = {sid: 0 for sid in servers}
+            cur.execute(
+                f"""
+                SELECT assigned_worker_id, COUNT(*) 
+                FROM creator_watchlist 
+                WHERE active = {active_val} AND assigned_worker_id IS NOT NULL 
+                GROUP BY assigned_worker_id
+                """
+            )
+            for r in cur.fetchall():
+                sid, cnt = r[0], r[1]
+                if sid in server_counts:
+                    server_counts[sid] = cnt
+
+            # Pick active server with minimum assigned creators (tie-break on lowest id)
+            least_loaded_server_id = min(servers, key=lambda s: (server_counts[s], s))
+
+            cur.execute(
+                f"UPDATE creator_watchlist SET assigned_worker_id = {placeholder} WHERE username = {placeholder}",
+                (least_loaded_server_id, clean_user),
+            )
+            logger.info("Assigned creator @%s to least-loaded server #%d (%d active)",
+                        clean_user, least_loaded_server_id, server_counts[least_loaded_server_id] + 1)
+            return least_loaded_server_id
+    except Exception as exc:
+        logger.warning("assign_creator_to_least_loaded_worker error for %s: %s", clean_user, exc)
+        return None
+
+
+def get_active_watchlist_for_worker(worker_id: int | None = None) -> list[str]:
+    """
+    Returns active creator usernames assigned to a specific child worker.
+    If worker_id is None, or if no child servers are registered in DB, returns all active creators.
+    """
+    try:
+        active_val = "TRUE" if USE_POSTGRES else "1"
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            # Check if cluster mode is active (any child servers registered)
+            cur.execute(f"SELECT COUNT(*) FROM child_servers WHERE active = {active_val}")
+            server_count = cur.fetchone()[0] or 0
+
+            if server_count == 0 or worker_id is None:
+                # Standalone mode: inspect all active creators
+                cur.execute(f"SELECT username FROM creator_watchlist WHERE active = {active_val} ORDER BY id ASC")
+                rows = cur.fetchall()
+                return [r[0] for r in rows if r and r[0]]
+
+            # Sharded cluster mode:
+            cur.execute(
+                f"""
+                SELECT username FROM creator_watchlist 
+                WHERE active = {active_val} AND assigned_worker_id = {placeholder} 
+                ORDER BY id ASC
+                """,
+                (worker_id,),
+            )
+            rows = cur.fetchall()
+            return [r[0] for r in rows if r and r[0]]
+    except Exception as exc:
+        logger.warning("get_active_watchlist_for_worker error for worker %s: %s", worker_id, exc)
+        return []
+
+
+def get_cluster_status() -> dict:
+    """Comprehensive cluster status report with load breakdown."""
+    try:
+        active_val = "TRUE" if USE_POSTGRES else "1"
+        servers = get_active_child_servers()
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT username, assigned_worker_id FROM creator_watchlist WHERE active = {active_val} ORDER BY id ASC")
+            creator_rows = cur.fetchall()
+
+        total_creators = len(creator_rows)
+        server_map = {}
+        for s in servers:
+            server_map[s["id"]] = {
+                "id": s["id"],
+                "name": s["name"],
+                "url": s["url"],
+                "uptimerobot_id": s["uptimerobot_id"],
+                "render_service_id": s["render_service_id"],
+                "creators": [],
+            }
+
+        unassigned = []
+        for username, wid in creator_rows:
+            if wid and wid in server_map:
+                server_map[wid]["creators"].append(username)
+            else:
+                unassigned.append(username)
+
+        return {
+            "total_servers": len(servers),
+            "total_creators": total_creators,
+            "servers": list(server_map.values()),
+            "unassigned": unassigned,
+        }
+    except Exception as exc:
+        logger.warning("get_cluster_status error: %s", exc)
+        return {"total_servers": 0, "total_creators": 0, "servers": [], "unassigned": []}
+
 
 

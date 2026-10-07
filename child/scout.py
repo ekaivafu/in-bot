@@ -24,6 +24,7 @@ import asyncio
 from datetime import datetime, timezone
 import html
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import logging
 import os
 import random
@@ -65,6 +66,10 @@ SCOUT_INTERVAL_MINUTES = int(os.getenv("SCOUT_INTERVAL_MINUTES", "30"))
 CREATOR_GAP_SECONDS = int(os.getenv("CREATOR_GAP_SECONDS", "300"))  # Minimum 5-minute gap between accounts
 PORT = int(os.getenv("PORT", "8080"))
 
+# Worker ID for cluster sharding (set per Render instance, e.g. WORKER_ID=1)
+_worker_id_raw = os.getenv("WORKER_ID", "").strip()
+WORKER_ID: int | None = int(_worker_id_raw) if _worker_id_raw.isdigit() else None
+
 # ── Optional Proxy Pool Rotation (e.g. Webshare 10 free proxies or custom) ───
 _RAW_PROXIES = [p.strip() for p in os.getenv("PROXY_POOL", "").split(",") if p.strip()]
 _proxy_index = 0
@@ -88,7 +93,8 @@ class ScoutHealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
-        response = b'{"status":"ok","worker":"scout","service":"instabot-child"}'
+        w_tag = f"worker-{WORKER_ID}" if WORKER_ID is not None else "scout"
+        response = json.dumps({"status": "ok", "worker": w_tag, "service": "instabot-child"}).encode("utf-8")
         self.wfile.write(response)
 
     def do_HEAD(self):
@@ -372,25 +378,29 @@ async def process_viral_reel(reel_data: dict, bot_token: str, chat_id: int | str
 # ── Scout Engine Cycle ─────────────────────────────────────────────────────────
 async def run_scout_cycle(enforce_gap: bool = True) -> int:
     """
-    Executes a complete inspection across all active creators in the watchlist.
+    Executes a complete inspection across all active creators assigned to this worker.
     Enforces a minimum 5-minute gap (CREATOR_GAP_SECONDS) between creators for safe, rate-limit-proof pacing.
     Returns total count of new viral reels processed.
     """
-    creators = database.get_active_watchlist()
+    w_label = f"Worker #{WORKER_ID}" if WORKER_ID is not None else "Standalone Worker"
+    creators = database.get_active_watchlist_for_worker(WORKER_ID)
 
-    # If watchlist in DB is empty, check environment variable WATCHLIST_CREATORS
-    if not creators:
+    # If watchlist is empty and running standalone, check environment variable WATCHLIST_CREATORS
+    if not creators and WORKER_ID is None:
         env_creators = os.getenv("WATCHLIST_CREATORS", "").strip()
         if env_creators:
             for c in [x.strip() for x in env_creators.split(",") if x.strip()]:
                 database.add_watchlist_creator(c)
-            creators = database.get_active_watchlist()
+            creators = database.get_active_watchlist_for_worker(WORKER_ID)
 
     if not creators:
-        logger.warning("Watchlist is empty. Add creators with `python child/scout.py --add <username>`")
+        if WORKER_ID is not None:
+            logger.info("Watchlist for %s is empty. Waiting for cluster assignments...", w_label)
+        else:
+            logger.warning("Watchlist is empty. Add creators with `python child/scout.py --add <username>`")
         return 0
 
-    logger.info("=== Starting Scout Cycle for %d creators: %s ===", len(creators), ", ".join(f"@{c}" for c in creators))
+    logger.info("=== Starting Scout Cycle for %s (%d creators: %s) ===", w_label, len(creators), ", ".join(f"@{c}" for c in creators))
     viral_found_count = 0
 
     for idx, creator in enumerate(creators, 1):
