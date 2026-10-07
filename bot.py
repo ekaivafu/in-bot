@@ -63,6 +63,10 @@ from database import (
     set_cached_media,
     update_cached_audio,
     register_channel_change_callback,
+    add_watchlist_creator,
+    remove_watchlist_creator,
+    get_active_watchlist,
+    get_pending_viral_reels,
 )
 from downloader import (
     cleanup_session,
@@ -519,6 +523,9 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(chan_label, callback_data="adm_chan_menu"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Viral Reel Scout", callback_data="adm_scout_view"),
         ],
         [
             InlineKeyboardButton(
@@ -1025,6 +1032,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await q.edit_message_text(
             f"{E_SPARKLES} <b>Cookie alert cleared.</b>\n\n"
             "Make sure you've updated <code>cookies.txt</code> on Render, then turn off Maintenance.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_back_admin(),
+        )
+
+    elif data == "adm_scout_view":
+        creators = get_active_watchlist()
+        pending = get_pending_viral_reels(limit=5)
+        text = (
+            f"🎯 <b>Viral Reel Scout System</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
+        )
+        if creators:
+            text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
+            if len(creators) > 8:
+                text += f" (+{len(creators)-8} more)"
+            text += "\n"
+        else:
+            text += "   <i>None yet.</i>\n"
+
+        text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
+        text += (
+            "<b>Management Commands:</b>\n"
+            "• <code>/scout add &lt;creator&gt;</code> - Add creator\n"
+            "• <code>/scout remove &lt;creator&gt;</code> - Remove creator\n"
+            "• <code>/scout list</code> - Show all target creators\n"
+        )
+        await q.edit_message_text(
+            text,
             parse_mode=ParseMode.HTML,
             reply_markup=kb_back_admin(),
         )
@@ -2138,6 +2174,63 @@ async def cmd_setlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+# ── Scout Watchlist Command ────────────────────────────────────────────────────
+async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to manage or view autonomous viral reel scout."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args
+    if args:
+        subcmd = args[0].lower()
+        if subcmd == "add" and len(args) > 1:
+            creator = args[1].strip().lstrip("@")
+            success = add_watchlist_creator(creator, added_by=user.id)
+            if success:
+                await update.message.reply_html(f"✅ <b>Added @{html.escape(creator)} to viral scout watchlist!</b>")
+            else:
+                await update.message.reply_html(f"⚠️ <b>Could not add @{html.escape(creator)} (might already be active).</b>")
+            return
+        elif subcmd in ("del", "remove") and len(args) > 1:
+            creator = args[1].strip().lstrip("@")
+            remove_watchlist_creator(creator)
+            await update.message.reply_html(f"🗑️ <b>Removed @{html.escape(creator)} from watchlist.</b>")
+            return
+        elif subcmd == "list":
+            creators = get_active_watchlist()
+            text = f"🎯 <b>Active Creator Watchlist ({len(creators)}):</b>\n\n"
+            text += "\n".join(f"• @{html.escape(c)}" for c in creators) if creators else "<i>No creators added yet.</i>"
+            await update.message.reply_html(text)
+            return
+
+    # Default /scout info overview
+    creators = get_active_watchlist()
+    pending = get_pending_viral_reels(limit=5)
+
+    text = (
+        "🎯 <b>Autonomous Viral Reel Scout</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
+    )
+    if creators:
+        text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
+        if len(creators) > 8:
+            text += f" (+{len(creators)-8} more)"
+        text += "\n"
+    else:
+        text += "   <i>None yet. Use /scout add &lt;creator&gt;</i>\n"
+
+    text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
+    text += (
+        "<b>Commands:</b>\n"
+        "• <code>/scout add &lt;username&gt;</code> - Add target creator\n"
+        "• <code>/scout remove &lt;username&gt;</code> - Remove creator\n"
+        "• <code>/scout list</code> - Show all target creators\n"
+    )
+    await update.message.reply_html(text)
+
+
 # ── Error handler ──────────────────────────────────────────────────────────────
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Unhandled exception: %s", context.error, exc_info=True)
@@ -2239,6 +2332,7 @@ def main() -> None:
     app.add_handler(CommandHandler("addchannel", cmd_addchannel))
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
     app.add_handler(CommandHandler("setlink",    cmd_setlink))
+    app.add_handler(CommandHandler("scout",      cmd_scout))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

@@ -269,6 +269,35 @@ def init_db() -> None:
                             caption       TEXT DEFAULT '',
                             created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                         );
+
+                        CREATE TABLE IF NOT EXISTS creator_watchlist (
+                            id         SERIAL PRIMARY KEY,
+                            username   TEXT UNIQUE NOT NULL,
+                            added_by   BIGINT DEFAULT 0,
+                            active     BOOLEAN DEFAULT TRUE,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        );
+
+                        CREATE TABLE IF NOT EXISTS scout_seen_reels (
+                            id            SERIAL PRIMARY KEY,
+                            shortcode     TEXT UNIQUE NOT NULL,
+                            creator       TEXT NOT NULL,
+                            likes         INTEGER DEFAULT 0,
+                            posted_date   TEXT DEFAULT '',
+                            discovered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            status        TEXT DEFAULT 'passed'
+                        );
+
+                        CREATE TABLE IF NOT EXISTS scout_queue (
+                            id            SERIAL PRIMARY KEY,
+                            shortcode     TEXT NOT NULL,
+                            creator       TEXT NOT NULL,
+                            likes         INTEGER DEFAULT 0,
+                            video_file_id TEXT DEFAULT '',
+                            caption       TEXT DEFAULT '',
+                            created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            dispatched    BOOLEAN DEFAULT FALSE
+                        );
                     """)
 
                     # Check if migration needed
@@ -334,6 +363,35 @@ def init_db() -> None:
                     audio_file_id TEXT DEFAULT '',
                     caption       TEXT DEFAULT '',
                     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS creator_watchlist (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username   TEXT UNIQUE NOT NULL,
+                    added_by   INTEGER DEFAULT 0,
+                    active     INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS scout_seen_reels (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT UNIQUE NOT NULL,
+                    creator       TEXT NOT NULL,
+                    likes         INTEGER DEFAULT 0,
+                    posted_date   TEXT DEFAULT '',
+                    discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    status        TEXT DEFAULT 'passed'
+                );
+
+                CREATE TABLE IF NOT EXISTS scout_queue (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT NOT NULL,
+                    creator       TEXT NOT NULL,
+                    likes         INTEGER DEFAULT 0,
+                    video_file_id TEXT DEFAULT '',
+                    caption       TEXT DEFAULT '',
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    dispatched    INTEGER DEFAULT 0
                 );
             """)
             _load_caches(cur)
@@ -708,4 +766,188 @@ def update_cached_audio(shortcode: str, audio_file_id: str) -> None:
             )
     except Exception as exc:
         logger.warning("update_cached_audio error for %s: %s", shortcode, exc)
+
+
+# ── Scout & Watchlist Helpers (for Child Worker) ──────────────────────────────
+def add_watchlist_creator(username: str, added_by: int = 0) -> bool:
+    """Add a creator username to the scout watchlist."""
+    clean_user = username.strip().lstrip("@").lower()
+    if not clean_user:
+        return False
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            if USE_POSTGRES:
+                cur.execute(
+                    """
+                    INSERT INTO creator_watchlist (username, added_by, active)
+                    VALUES (%s, %s, TRUE)
+                    ON CONFLICT (username) DO UPDATE SET active = TRUE
+                    """,
+                    (clean_user, added_by),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO creator_watchlist (username, added_by, active)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT (username) DO UPDATE SET active = 1
+                    """,
+                    (clean_user, added_by),
+                )
+            return True
+    except Exception as exc:
+        logger.warning("add_watchlist_creator error for %s: %s", clean_user, exc)
+        return False
+
+
+def remove_watchlist_creator(username: str) -> bool:
+    """Deactivate or remove a creator from the scout watchlist."""
+    clean_user = username.strip().lstrip("@").lower()
+    if not clean_user:
+        return False
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"UPDATE creator_watchlist SET active = {('FALSE' if USE_POSTGRES else '0')} WHERE username = {placeholder}",
+                (clean_user,),
+            )
+            return True
+    except Exception as exc:
+        logger.warning("remove_watchlist_creator error for %s: %s", clean_user, exc)
+        return False
+
+
+def get_active_watchlist() -> list[str]:
+    """Return all active creator usernames to scout."""
+    try:
+        with get_db_cursor() as cur:
+            active_clause = "active = TRUE" if USE_POSTGRES else "active = 1"
+            cur.execute(f"SELECT username FROM creator_watchlist WHERE {active_clause} ORDER BY id ASC")
+            rows = cur.fetchall()
+            return [r[0] for r in rows if r and r[0]]
+    except Exception as exc:
+        logger.warning("get_active_watchlist error: %s", exc)
+        return []
+
+
+def is_reel_seen(shortcode: str) -> bool:
+    """Check if shortcode was already discovered/processed by the scout."""
+    if not shortcode:
+        return True
+    sc = shortcode.strip()
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT 1 FROM scout_seen_reels WHERE shortcode = {placeholder} LIMIT 1", (sc,))
+            return cur.fetchone() is not None
+    except Exception as exc:
+        logger.warning("is_reel_seen error for %s: %s", sc, exc)
+        return False
+
+
+def record_seen_reel(shortcode: str, creator: str, likes: int = 0, posted_date: str = "", status: str = "passed") -> None:
+    """Record reel in scout_seen_reels to guarantee zero duplicates."""
+    if not shortcode:
+        return
+    sc = shortcode.strip()
+    c = creator.strip().lstrip("@").lower()
+    try:
+        if USE_POSTGRES:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scout_seen_reels (shortcode, creator, likes, posted_date, status)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (shortcode) DO NOTHING
+                    """,
+                    (sc, c, likes, posted_date, status),
+                )
+        else:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO scout_seen_reels (shortcode, creator, likes, posted_date, status)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (sc, c, likes, posted_date, status),
+                )
+    except Exception as exc:
+        logger.warning("record_seen_reel error for %s: %s", sc, exc)
+
+
+def enqueue_viral_reel(shortcode: str, creator: str, likes: int, video_file_id: str, caption: str = "") -> bool:
+    """Add a qualified downloaded viral reel to the dispatch queue."""
+    if not shortcode or not video_file_id:
+        return False
+    sc = shortcode.strip()
+    c = creator.strip().lstrip("@").lower()
+    try:
+        if USE_POSTGRES:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scout_queue (shortcode, creator, likes, video_file_id, caption, dispatched)
+                    VALUES (%s, %s, %s, %s, %s, FALSE)
+                    """,
+                    (sc, c, likes, video_file_id, caption),
+                )
+        else:
+            with get_db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scout_queue (shortcode, creator, likes, video_file_id, caption, dispatched)
+                    VALUES (?, ?, ?, ?, ?, 0)
+                    """,
+                    (sc, c, likes, video_file_id, caption),
+                )
+        return True
+    except Exception as exc:
+        logger.warning("enqueue_viral_reel error for %s: %s", sc, exc)
+        return False
+
+
+def get_pending_viral_reels(limit: int = 5) -> list[dict]:
+    """Retrieve pending viral reels from queue ready for dispatch."""
+    try:
+        with get_db_cursor() as cur:
+            dispatched_clause = "dispatched = FALSE" if USE_POSTGRES else "dispatched = 0"
+            placeholder = "%s" if USE_POSTGRES else "?"
+            cur.execute(
+                f"""
+                SELECT id, shortcode, creator, likes, video_file_id, caption
+                FROM scout_queue
+                WHERE {dispatched_clause}
+                ORDER BY id ASC
+                LIMIT {placeholder}
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "shortcode": r[1],
+                    "creator": r[2],
+                    "likes": r[3],
+                    "video_file_id": r[4],
+                    "caption": r[5],
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("get_pending_viral_reels error: %s", exc)
+        return []
+
+
+def mark_viral_reel_dispatched(queue_id: int) -> None:
+    """Mark a queued reel as dispatched."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        dispatched_val = "TRUE" if USE_POSTGRES else "1"
+        with get_db_cursor() as cur:
+            cur.execute(f"UPDATE scout_queue SET dispatched = {dispatched_val} WHERE id = {placeholder}", (queue_id,))
+    except Exception as exc:
+        logger.warning("mark_viral_reel_dispatched error for id %s: %s", queue_id, exc)
 
