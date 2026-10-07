@@ -67,6 +67,8 @@ from database import (
     remove_watchlist_creator,
     get_active_watchlist,
     get_pending_viral_reels,
+    mark_viral_reel_dispatched,
+    get_subscribers_for_creator,
     get_user_scout_limit,
     set_user_scout_limit,
     get_user_info,
@@ -570,13 +572,15 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
     text += f"\n📥 <b>Pending Queued Viral Reels:</b> {len(pending)}\n\n"
     text += "<i>Use buttons below to manage target creators and workers:</i>"
 
-    buttons = [
-        [
-            InlineKeyboardButton("➕ Add Creator", callback_data="adm_scout_add_btn"),
-        ],
-    ]
+    buttons = []
+    if pending:
+        buttons.append([
+            InlineKeyboardButton(f"🚀 Send Pending Reels ({len(pending)})", callback_data="adm_scout_dispatch")
+        ])
+    row_add = [InlineKeyboardButton("➕ Add Creator", callback_data="adm_scout_add_btn")]
     if creators:
-        buttons[0].append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"))
+        row_add.append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"))
+    buttons.append(row_add)
     buttons.append([
         InlineKeyboardButton("⚙️ Set User Slot Limit", callback_data="adm_setlimit_prompt"),
         InlineKeyboardButton("📋 View User Limits", callback_data="adm_view_limits"),
@@ -1349,6 +1353,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         creator = data.split(":", 1)[1].strip()
         remove_watchlist_creator(creator)
         await q.answer(f"Removed @{creator} from scout.")
+        text, kb = build_scout_text()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "adm_scout_dispatch":
+        count = await dispatch_pending_scout_queue(context.bot)
+        if count > 0:
+            await q.answer(f"🚀 Dispatched {count} queued reel(s)!")
+        else:
+            await q.answer("ℹ️ No pending reels in queue.")
         text, kb = build_scout_text()
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
@@ -2666,6 +2679,81 @@ async def cmd_setlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+# ── Scout Queue Dispatcher ────────────────────────────────────────────────────
+async def dispatch_pending_scout_queue(bot) -> int:
+    """
+    Checks scout_queue for pending viral reels and delivers them to subscribers and admins.
+    Returns count of dispatched items.
+    """
+    pending = get_pending_viral_reels(limit=10)
+    if not pending:
+        return 0
+
+    dispatched_count = 0
+    for item in pending:
+        q_id = item["id"]
+        shortcode = item["shortcode"]
+        creator = item["creator"]
+        file_id = item["video_file_id"]
+        likes = item.get("likes") or 0
+
+        # Find all subscribers from user_watchlist
+        subscribers = get_subscribers_for_creator(creator)
+
+        # Recipients: all subscribers + all admins (ensures admin always gets discovery)
+        recipients = set(subscribers)
+        recipients.update(ADMIN_IDS)
+
+        caption = (
+            f"🎯 <b>Viral Reel Detected!</b>\n\n"
+            f"👤 <b>Creator:</b> @{html.escape(creator)}\n"
+            f"❤️ <b>Likes:</b> {likes:,}\n"
+            f"🔗 <a href='https://www.instagram.com/reel/{shortcode}/'>Original Instagram Reel</a>\n\n"
+            f"✨ <i>Auto-delivered from Watchlist!</i>"
+        )
+
+        for uid in recipients:
+            try:
+                await bot.send_video(
+                    chat_id=uid,
+                    video=file_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb_video_actions(shortcode),
+                    supports_streaming=True,
+                )
+            except Exception as e_send:
+                logger.warning("Failed to send queued reel %s to user %s: %s", shortcode, uid, e_send)
+
+        # Mark as dispatched in database so it is never stuck in queue
+        mark_viral_reel_dispatched(q_id)
+        dispatched_count += 1
+        logger.info("Dispatched queued viral reel %s (@%s) to %d recipients", shortcode, creator, len(recipients))
+
+    return dispatched_count
+
+
+async def scout_dispatcher_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job running every 30 seconds to dispatch viral reels found by workers."""
+    try:
+        await dispatch_pending_scout_queue(context.bot)
+    except Exception as exc:
+        logger.error("scout_dispatcher_job error: %s", exc)
+
+
+async def cmd_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Force-dispatch any pending reels in scout queue immediately."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    count = await dispatch_pending_scout_queue(context.bot)
+    if count > 0:
+        await update.message.reply_html(f"🚀 <b>Dispatched {count} pending viral reel(s) to subscribers!</b>")
+    else:
+        await update.message.reply_html("ℹ️ <b>Scout queue is empty.</b> No pending reels to dispatch.")
+
+
 # ── Scout Watchlist Command ────────────────────────────────────────────────────
 async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to manage or view autonomous viral reel scout."""
@@ -3183,6 +3271,16 @@ async def post_init(application: Application) -> None:
         )
         logger.info("Registered 30-min cookie health check job")
 
+    # Schedule Scout Queue Auto-Dispatcher (runs every 30s)
+    if not application.job_queue.get_jobs_by_name("scout_dispatcher"):
+        application.job_queue.run_repeating(
+            scout_dispatcher_job,
+            interval=30,  # 30 seconds
+            first=5,       # first check in 5 sec
+            name="scout_dispatcher",
+        )
+        logger.info("Registered 30-sec scout queue dispatcher job")
+
 
 # ── Health Check Server (Render Web Service Port Binding) ──────────────────────
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -3250,6 +3348,7 @@ def main() -> None:
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
     app.add_handler(CommandHandler("setlink",    cmd_setlink))
     app.add_handler(CommandHandler("scout",      cmd_scout))
+    app.add_handler(CommandHandler("dispatch",   cmd_dispatch))
     app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
     app.add_handler(CommandHandler(["getlimit", "limits"], cmd_getlimit))
