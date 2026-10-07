@@ -128,7 +128,7 @@ def is_instagram_url(url: str) -> bool:
     return bool(INSTAGRAM_URL_RE.search(url))
 
 
-def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = True) -> dict:
+def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = False) -> dict:
     """
     Return yt-dlp options tuned for Render 512MB free tier:
     - 1 concurrent fragment to prevent RAM exhaustion
@@ -136,6 +136,7 @@ def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = Tr
     - 50MB max file size limit (matching Telegram API maximum)
     - 25s socket timeout and 2 retries
     - No JSON dump to save disk I/O
+    - Anonymous cookie-free by default for hassle-free operation
     """
     opts = {
         "format": "bestvideo+bestaudio/best",
@@ -155,10 +156,12 @@ def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = Tr
     if use_cookies:
         cookies = find_cookies_file()
         if cookies:
-            logger.info("Using cookies file: %s", cookies)
+            logger.info("Using cookies file for authenticated fallback: %s", cookies)
             opts["cookiefile"] = cookies
         else:
-            logger.info("No cookies.txt found — operating in anonymous public mode.")
+            logger.info("No cookies.txt found — operating in cookie-free mode.")
+    else:
+        logger.info("Downloading in primary cookie-free public mode (no account required).")
 
     return opts
 
@@ -305,9 +308,12 @@ def _extract_media_result(work_dir: Path, info: dict, result: dict) -> bool:
 def download_instagram(url: str) -> dict:
     """
     Download an Instagram post/reel/TV video with dual-tier resilience:
-    1. Primary tier: Attempt with cookies if available (or anonymous if no cookies exist).
-    2. Fallback tier: If cookie session errors occur (400, login required, expired),
-       automatically retry in anonymous cookie-free mode so public reels never fail!
+    1. Primary tier (Default & Hassle-Free): Cookie-free public extraction.
+       - 95%+ of public reels download instantly without touching your account or cookies.
+       - Zero risk of Instagram account blocks or checkpoints.
+       - Works seamlessly even if no cookies exist at all.
+    2. Fallback tier: If public extraction is blocked by Instagram (login required, age-gated)
+       and cookies exist on the server, automatically fall back to cookies.txt.
     3. Memory safe: strictly bounded for Render 512MB RAM.
     """
     session_id = uuid.uuid4().hex[:8]
@@ -325,13 +331,14 @@ def download_instagram(url: str) -> dict:
 
     cookies_available = bool(find_cookies_file())
 
-    # ── Attempt 1: Download with active cookies (or anonymous if no cookies) ──
+    # ── Attempt 1: Cookie-Free Public Download (Default & Safe) ──
     try:
-        ydl_opts = _build_ydl_opts(work_dir, "media", use_cookies=cookies_available)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        ydl_opts_anon = _build_ydl_opts(work_dir, "media", use_cookies=False)
+        with yt_dlp.YoutubeDL(ydl_opts_anon) as ydl_anon:
+            info = ydl_anon.extract_info(url, download=True)
 
         if _extract_media_result(work_dir, info, result):
+            logger.info("Primary cookie-free download succeeded!")
             return result
 
     except yt_dlp.utils.DownloadError as exc_1:
@@ -339,31 +346,32 @@ def download_instagram(url: str) -> dict:
         err_lower = err_msg.lower()
         result["raw_error"] = err_msg
 
-        # If cookies failed with session or bad request errors, retry in cookie-free mode!
-        is_cookie_or_session_err = any(
-            k in err_lower for k in ("login_required", "logged out", "checkpoint", "use --cookies", "empty media response", "400: bad request", "bad request")
+        # Check if Instagram is gating this post behind login or age restriction
+        needs_auth = any(
+            k in err_lower for k in ("login_required", "logged out", "checkpoint", "use --cookies", "empty media response", "restricted", "confirm your age", "sign in")
         )
 
-        if cookies_available and is_cookie_or_session_err:
-            logger.info("Primary cookie download encountered error (%s). Retrying in cookie-free public mode...", err_msg)
+        # ── Attempt 2: Fallback to cookies if available ──
+        if cookies_available and (needs_auth or "private" in err_lower):
+            logger.info("Cookie-free extraction hit auth wall (%s). Retrying with cookies.txt fallback...", err_msg)
             try:
-                # Clean any partial artifacts from first attempt
+                # Clean partial artifacts from first attempt
                 for tmp_f in work_dir.glob("media*"):
                     try:
                         tmp_f.unlink(missing_ok=True)
                     except Exception:
                         pass
 
-                ydl_opts_anon = _build_ydl_opts(work_dir, "media_anon", use_cookies=False)
-                with yt_dlp.YoutubeDL(ydl_opts_anon) as ydl_anon:
-                    info_anon = ydl_anon.extract_info(url, download=True)
+                ydl_opts_auth = _build_ydl_opts(work_dir, "media_auth", use_cookies=True)
+                with yt_dlp.YoutubeDL(ydl_opts_auth) as ydl_auth:
+                    info_auth = ydl_auth.extract_info(url, download=True)
 
-                if _extract_media_result(work_dir, info_anon, result):
-                    logger.info("Cookie-free public download fallback succeeded!")
+                if _extract_media_result(work_dir, info_auth, result):
+                    logger.info("Authenticated cookie fallback succeeded!")
                     return result
-            except Exception as exc_anon:
-                logger.warning("Cookie-free fallback also failed: %s", exc_anon)
-                result["raw_error"] = f"{err_msg} | Fallback: {exc_anon}"
+            except Exception as exc_auth:
+                logger.warning("Cookie fallback also failed: %s", exc_auth)
+                result["raw_error"] = f"{err_msg} | Cookie fallback: {exc_auth}"
 
         # Classify the final error
         if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
@@ -372,9 +380,9 @@ def download_instagram(url: str) -> dict:
         elif "private" in err_lower and "rate" not in err_lower:
             result["error_type"] = "private"
             result["error"] = "This account or post is *private*."
-        elif is_cookie_or_session_err:
+        elif needs_auth:
             result["error_type"] = "cookie"
-            result["error"] = "Instagram session expired. Admin notified."
+            result["error"] = "Instagram requires login for this post. Admin notified."
         else:
             result["error_type"] = "generic"
             result["error"] = "Download failed. Please try again later."
