@@ -69,6 +69,9 @@ from database import (
     get_pending_viral_reels,
     get_user_scout_limit,
     set_user_scout_limit,
+    get_user_info,
+    get_user_id_by_username,
+    get_all_custom_limits,
     get_user_watchlist,
     get_user_watchlist_count,
     add_user_watchlist_creator,
@@ -574,6 +577,10 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
     ]
     if creators:
         buttons[0].append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"))
+    buttons.append([
+        InlineKeyboardButton("⚙️ Set User Slot Limit", callback_data="adm_setlimit_prompt"),
+        InlineKeyboardButton("📋 View User Limits", callback_data="adm_view_limits"),
+    ])
     buttons.append([
         InlineKeyboardButton("⚡ Manage Servers", callback_data="adm_srv_menu"),
         InlineKeyboardButton("🔄 Refresh", callback_data="adm_scout_refresh"),
@@ -1345,6 +1352,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text, kb = build_scout_text()
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
+    elif data == "adm_setlimit_prompt":
+        context.user_data["state"] = "awaiting_user_limit"
+        await q.message.reply_html(
+            "⚙️ <b>Set User Watchlist Slot Limit</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send the user's <b>Telegram User ID</b> or <b>@username</b> and slot count:\n\n"
+            "<b>Examples:</b>\n"
+            "• <code>123456789 5</code>\n"
+            "• <code>@username 5</code>\n\n"
+            "<i>(Default for free users is 1 creator. Setting to 5 allows monitoring 5 accounts.)</i>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+        )
+
+    elif data == "adm_view_limits":
+        customs = get_all_custom_limits()
+        if not customs:
+            text = (
+                "📋 <b>Custom User Watchlist Limits</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "<i>No custom user limits configured yet. All users currently have the default 1 slot.</i>\n\n"
+                "Tap <b>⚙️ Set User Slot Limit</b> below to upgrade a user!"
+            )
+        else:
+            lines = [
+                "📋 <b>Users With Custom Watchlist Limits</b>",
+                "━━━━━━━━━━━━━━━━━━━━\n",
+            ]
+            for c in customs:
+                u_info = f"@{c['username']}" if c['username'] else (c['first_name'] or "User")
+                used = len(get_user_watchlist(c['user_id']))
+                lines.append(f"• <b>{html.escape(u_info)}</b> (ID: <code>{c['user_id']}</code>): <b>{c['limit']} slots</b> (using {used})")
+            lines.append(f"\n<i>Total upgraded users: {len(customs)}</i>")
+            text = "\n".join(lines)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Set User Slot Limit", callback_data="adm_setlimit_prompt")],
+            [InlineKeyboardButton("⬅️ Back to Scout", callback_data="adm_scout_refresh")],
+        ])
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
     # ── Audio Extraction Callback ─────────────────────────────────────────
     elif data.startswith("audio:"):
         shortcode = data.split(":", 1)[1].strip()
@@ -1573,6 +1621,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 context.user_data.pop("state", None)
                 await message.reply_text(f"{E_WARNING} <b>No channel to link.</b> Add a channel first.", parse_mode=ParseMode.HTML, reply_markup=rkb_admin())
+            return
+        if state == "awaiting_user_limit":
+            context.user_data.pop("state", None)
+            parts = text.split()
+            if len(parts) >= 2:
+                raw_target = parts[0].strip()
+                try:
+                    lim = int(parts[1])
+                    if lim < 1:
+                        lim = 1
+
+                    if raw_target.lstrip("-").isdigit():
+                        target_uid = int(raw_target)
+                    else:
+                        target_uid = get_user_id_by_username(raw_target)
+                        if not target_uid:
+                            await message.reply_html(
+                                f"⚠️ Could not find user with username <b>{html.escape(raw_target)}</b> in database.\n"
+                                f"Please make sure they have used the bot before, or provide their numeric Telegram User ID.",
+                                reply_markup=rkb_admin(),
+                            )
+                            return
+
+                    set_user_scout_limit(target_uid, lim)
+                    u_info = get_user_info(target_uid)
+                    u_disp = f"@{u_info['username']}" if u_info and u_info.get("username") else f"User #{target_uid}"
+                    await message.reply_html(
+                        f"✅ <b>Slot Limit Updated!</b>\n\n"
+                        f"👤 <b>User:</b> {html.escape(u_disp)} (<code>{target_uid}</code>)\n"
+                        f"📊 <b>New Slot Limit:</b> <b>{lim} creators</b>\n\n"
+                        f"This user can now monitor up to {lim} accounts via <b>🎯 My Watchlist</b>!",
+                        reply_markup=rkb_admin(),
+                    )
+                    return
+                except ValueError:
+                    pass
+
+            await message.reply_html(
+                "⚠️ Invalid format. Please provide: <code>&lt;user_id or @username&gt; &lt;limit&gt;</code>\n"
+                "Example: <code>123456789 5</code> or <code>@username 5</code>",
+                reply_markup=rkb_admin(),
+            )
             return
         if state == "awaiting_admin_scout_add":
             context.user_data.pop("state", None)
@@ -2682,7 +2772,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Admin Slot Limit Commands ──────────────────────────────────────────────────
 async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command: Set creator slot limit for any user (/setlimit <user_id> <limit>)."""
+    """Admin command: Set creator slot limit for any user (/setlimit <user_id or @username> <limit>)."""
     user = update.effective_user
     if not user or not is_admin(user.id):
         return
@@ -2690,53 +2780,100 @@ async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     args = context.args
     if not args or len(args) < 2:
         await update.message.reply_html(
-            "<b>Usage:</b> <code>/setlimit &lt;user_id&gt; &lt;limit&gt;</code>\n"
-            "Example: <code>/setlimit 123456789 5</code>"
+            "<b>Usage:</b> <code>/setlimit &lt;user_id or @username&gt; &lt;limit&gt;</code>\n\n"
+            "<b>Examples:</b>\n"
+            "• <code>/setlimit 123456789 5</code>\n"
+            "• <code>/setlimit @username 5</code>"
         )
         return
 
+    raw_target = args[0].strip()
     try:
-        target_uid = int(args[0])
         limit_val = int(args[1])
+        if limit_val < 1:
+            limit_val = 1
     except ValueError:
-        await update.message.reply_html("⚠️ User ID and limit must be numbers.")
+        await update.message.reply_html("⚠️ Limit must be a positive number.")
         return
+
+    if raw_target.lstrip("-").isdigit():
+        target_uid = int(raw_target)
+    else:
+        target_uid = get_user_id_by_username(raw_target)
+        if not target_uid:
+            await update.message.reply_html(
+                f"⚠️ Could not find user with username <b>{html.escape(raw_target)}</b> in database.\n"
+                f"Please ensure they have used the bot before, or provide their numeric Telegram User ID."
+            )
+            return
 
     success = set_user_scout_limit(target_uid, limit_val)
     if success:
+        u_info = get_user_info(target_uid)
+        u_disp = f"@{u_info['username']}" if u_info and u_info.get("username") else f"User #{target_uid}"
         await update.message.reply_html(
-            f"✅ <b>Slot Limit Updated!</b>\n"
-            f"User ID: <code>{target_uid}</code>\n"
-            f"New Creator Limit: <b>{limit_val}</b> creator slots"
+            f"✅ <b>Slot Limit Updated!</b>\n\n"
+            f"👤 User: <b>{html.escape(u_disp)}</b> (<code>{target_uid}</code>)\n"
+            f"📊 New Creator Limit: <b>{limit_val}</b> slots\n\n"
+            f"This user can now monitor up to {limit_val} accounts via <b>🎯 My Watchlist</b>!"
         )
     else:
         await update.message.reply_html("⚠️ Failed to update limit in database.")
 
 
 async def cmd_getlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command: Check user creator slot limit (/getlimit <user_id>)."""
+    """Admin command: Check user creator slot limit (/getlimit [user_id or @username])."""
     user = update.effective_user
     if not user or not is_admin(user.id):
         return
 
     args = context.args
     if not args:
-        await update.message.reply_html("<b>Usage:</b> <code>/getlimit &lt;user_id&gt;</code>")
+        customs = get_all_custom_limits()
+        if not customs:
+            await update.message.reply_html(
+                "📋 <b>User Watchlist Limits</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "<i>No custom user limits set yet. All users currently have the default 1 slot.</i>\n\n"
+                "<b>Usage:</b>\n"
+                "• <code>/setlimit &lt;user_id or @username&gt; &lt;limit&gt;</code>\n"
+                "• <code>/getlimit &lt;user_id or @username&gt;</code>"
+            )
+            return
+
+        lines = ["📋 <b>Users With Custom Watchlist Limits</b>", "━━━━━━━━━━━━━━━━━━━━\n"]
+        for c in customs:
+            u_info = f"@{c['username']}" if c['username'] else (c['first_name'] or "User")
+            used = len(get_user_watchlist(c['user_id']))
+            lines.append(f"• <b>{html.escape(u_info)}</b> (ID: <code>{c['user_id']}</code>): <b>{c['limit']} slots</b> (using {used})")
+
+        lines.append(f"\n<i>Total upgraded users: {len(customs)}</i>")
+        await update.message.reply_html("\n".join(lines))
         return
 
-    try:
-        target_uid = int(args[0])
-    except ValueError:
-        await update.message.reply_html("⚠️ User ID must be a number.")
-        return
+    raw_target = args[0].strip()
+    if raw_target.lstrip("-").isdigit():
+        target_uid = int(raw_target)
+    else:
+        target_uid = get_user_id_by_username(raw_target)
+        if not target_uid:
+            await update.message.reply_html(
+                f"⚠️ Could not find user with username <b>{html.escape(raw_target)}</b> in database.\n"
+                f"Please ensure they have used the bot before, or provide their numeric Telegram User ID."
+            )
+            return
 
     limit_val = get_user_scout_limit(target_uid)
     monitored = get_user_watchlist(target_uid)
+    u_info = get_user_info(target_uid)
+    u_disp = f"@{u_info['username']}" if u_info and u_info.get("username") else (u_info.get("first_name", "") if u_info else "")
+    disp_suffix = f" ({u_disp})" if u_disp else ""
+
     await update.message.reply_html(
         f"👤 <b>User Watchlist Info</b>\n"
-        f"User ID: <code>{target_uid}</code>\n"
+        f"User ID: <code>{target_uid}</code>{disp_suffix}\n"
         f"Limit: <b>{limit_val}</b> slots\n"
-        f"Monitored ({len(monitored)}): {', '.join('@' + c for c in monitored) if monitored else 'None'}"
+        f"Monitored ({len(monitored)}/{limit_val}): {', '.join('@' + c for c in monitored) if monitored else 'None'}"
     )
 
 
@@ -3115,7 +3252,7 @@ def main() -> None:
     app.add_handler(CommandHandler("scout",      cmd_scout))
     app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
-    app.add_handler(CommandHandler("getlimit",   cmd_getlimit))
+    app.add_handler(CommandHandler(["getlimit", "limits"], cmd_getlimit))
     app.add_handler(CommandHandler(["cluster", "servers"], cmd_cluster))
     app.add_handler(CommandHandler("deploy_child", cmd_deploy_child))
     app.add_handler(CommandHandler("addserver",    cmd_addserver))

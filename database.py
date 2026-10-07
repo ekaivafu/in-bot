@@ -1052,6 +1052,69 @@ def set_user_scout_limit(user_id: int, limit: int) -> bool:
         return False
 
 
+def get_user_info(user_id: int) -> Optional[dict]:
+    """Retrieve user details (username, first_name) from the users table."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT user_id, username, first_name FROM users WHERE user_id = {placeholder} LIMIT 1", (user_id,))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "user_id": int(row[0]),
+                    "username": row[1] or "",
+                    "first_name": row[2] or "",
+                }
+            return None
+    except Exception as exc:
+        logger.warning("get_user_info error for %s: %s", user_id, exc)
+        return None
+
+
+def get_user_id_by_username(username: str) -> Optional[int]:
+    """Lookup telegram user_id by their telegram username (with or without @)."""
+    clean_username = username.strip().lstrip("@").lower()
+    if not clean_username:
+        return None
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT user_id FROM users WHERE LOWER(username) = {placeholder} LIMIT 1", (clean_username,))
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except Exception as exc:
+        logger.warning("get_user_id_by_username error for %s: %s", clean_username, exc)
+        return None
+
+
+def get_all_custom_limits() -> list[dict]:
+    """Retrieve all users who have custom slot limits configured."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT l.user_id, l.custom_limit, u.username, u.first_name 
+                FROM user_scout_limits l
+                LEFT JOIN users u ON l.user_id = u.user_id
+                ORDER BY l.custom_limit DESC
+                """
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "user_id": int(r[0]),
+                    "limit": int(r[1]),
+                    "username": r[2] or "",
+                    "first_name": r[3] or "",
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("get_all_custom_limits error: %s", exc)
+        return []
+
+
+
 def get_user_watchlist(user_id: int) -> list[str]:
     """Retrieve all creator usernames actively tracked by a specific user."""
     try:
