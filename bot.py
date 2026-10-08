@@ -35,7 +35,7 @@ from telegram import (
     InputMediaPhoto,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -111,6 +111,29 @@ def safe_html(text: any) -> str:
     if text is None:
         return ""
     return html.escape(str(text))
+
+
+async def safe_edit_message(
+    q,
+    text: str,
+    parse_mode: str = ParseMode.HTML,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    disable_web_page_preview: bool = False,
+) -> None:
+    """Safely edit message text, suppressing harmless 'Message is not modified' errors."""
+    try:
+        await q.edit_message_text(
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except (BadRequest, TelegramError) as exc:
+        if "not modified" in str(exc).lower():
+            logger.debug("safe_edit_message: Message content unchanged (%s)", exc)
+        else:
+            raise
+
 
 from emojis import (
     E_FLAME_BUTTERFLY,
@@ -1376,8 +1399,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── User Watchlist Interactive Callbacks ──────────────────────────────
     elif data == "watch_refresh":
+        await q.answer("🔄 Watchlist refreshed!")
         text, kb = build_watchlist_text(uid)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data == "watch_add_btn":
         context.user_data["state"] = "awaiting_user_watch_add"
@@ -1398,9 +1422,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         if len(my_creators) == 1:
             text, kb = build_target_editor_text(uid, my_creators[0]["username"], is_admin_mode=False)
-            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
         else:
-            await q.edit_message_text(
+            await safe_edit_message(
+                q,
                 "⚙️ <b>Select Creator to Edit Targets</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 "Tap a creator below to customize minimum likes and maximum age:",
@@ -1411,7 +1436,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("usr_settgt:"):
         creator = data.split(":", 1)[1].strip()
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("usr_tl:"):
         parts = data.split(":")
@@ -1421,7 +1446,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         set_user_watchlist_targets(uid, creator, min_likes=new_l, max_days=curr.get("max_days", 5.0))
         await q.answer(f"✅ Target updated: {new_l:,}+ likes!")
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("usr_td:"):
         parts = data.split(":")
@@ -1432,7 +1457,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         d_str = f"{int(new_d)}d" if new_d.is_integer() else f"{new_d:.1f}d"
         await q.answer(f"✅ Target updated: Max {d_str} old!")
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("usr_tcustom:"):
         creator = data.split(":", 1)[1].strip()
@@ -1473,8 +1498,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── Admin Cluster & Child Server Callbacks ─────────────────────────────
     elif data in ("adm_srv_menu", "adm_srv_refresh"):
+        if data == "adm_srv_refresh":
+            await q.answer("🔄 Cluster status refreshed!")
+        else:
+            await q.answer()
         text, kb = build_cluster_text()
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
     elif data == "adm_srv_add_btn":
         context.user_data["state"] = "awaiting_server_url"
@@ -1536,8 +1565,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── Admin Scout Callbacks ──────────────────────────────────────────────
     elif data in ("adm_scout_view", "adm_scout_refresh"):
+        if data == "adm_scout_refresh":
+            await q.answer("🔄 Scout watchlist refreshed!")
+        else:
+            await q.answer()
         text, kb = build_scout_text()
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data == "adm_scout_add_btn":
         context.user_data["state"] = "awaiting_admin_scout_add"
@@ -1558,9 +1591,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         if len(creators) == 1:
             text, kb = build_target_editor_text(uid, creators[0]["username"], is_admin_mode=True)
-            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
         else:
-            await q.edit_message_text(
+            await safe_edit_message(
+                q,
                 "🎯 <b>Select Creator to Edit Scout Targets</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 "Tap a creator below to customize qualification threshold:",
@@ -1571,7 +1605,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("adm_settgt:"):
         creator = data.split(":", 1)[1].strip()
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("adm_tl:"):
         parts = data.split(":")
@@ -1581,7 +1615,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         set_creator_global_targets(creator, min_likes=new_l, max_days=curr.get("max_days", 5.0))
         await q.answer(f"✅ Scout target: {new_l:,}+ likes!")
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("adm_td:"):
         parts = data.split(":")
@@ -1592,7 +1626,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         d_str = f"{int(new_d)}d" if new_d.is_integer() else f"{new_d:.1f}d"
         await q.answer(f"✅ Scout target: Max {d_str} old!")
         text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data.startswith("adm_tcustom:"):
         creator = data.split(":", 1)[1].strip()
@@ -3709,6 +3743,12 @@ async def cmd_deploy_child(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ── Error handler ──────────────────────────────────────────────────────────────
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err_str = str(context.error) if context.error else ""
+    # Harmless Telegram API warning when refreshing or clicking identical button state
+    if "not modified" in err_str.lower():
+        logger.debug("Suppressed harmless Telegram error: %s", err_str)
+        return
+
     logger.error("Unhandled exception: %s", context.error, exc_info=True)
     try:
         await alert_admin(
