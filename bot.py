@@ -735,24 +735,52 @@ async def render_creator_diagnostic(
 
     # Fetch live Instagram shortcodes in background thread to never block asyncio loop
     try:
-        shortcodes = await asyncio.to_thread(fetch_creator_reel_shortcodes, clean_user)
+        shortcodes, diag = await asyncio.to_thread(fetch_creator_reel_shortcodes, clean_user, True)
     except Exception as exc:
         logger.warning("Diagnostic scrape error for @%s: %s", clean_user, exc)
         shortcodes = []
+        diag = {"status": "error", "error": str(exc)}
 
     if not shortcodes:
+        diag_status = diag.get("status", "empty")
+        if diag_status == "not_found":
+            status_title = "❌ <b>Profile Not Found</b>"
+            status_body = (
+                f"• Instagram returned no matching public account for <code>@{html.escape(clean_user)}</code>.\n"
+                "• Please verify the username spelling (no spaces or '@' symbols).\n"
+            )
+        elif diag_status == "empty":
+            status_title = "⚠️ <b>No Public Video Reels</b>"
+            status_body = (
+                f"• Account <code>@{html.escape(clean_user)}</code> is public and reachable.\n"
+                "• However, no public video reels have been posted yet.\n"
+                "• Scout will automatically detect new reels as soon as they are uploaded!\n"
+            )
+        elif diag_status == "login_challenge":
+            status_title = "🔒 <b>Instagram Cloud Challenge</b>"
+            status_body = (
+                "• Instagram temporarily served a login wall to this server IP.\n"
+                "• The crawler relay fallback is engaged. Tap <b>Re-Check Now</b> below to retry!\n"
+            )
+        else:
+            status_title = "⚠️ <b>Could Not Load Reels</b>"
+            status_body = (
+                "• Account may be <b>private</b> or username misspelled.\n"
+                "• Account has not posted any public reels yet.\n"
+                "• Instagram temporary rate-limit on cloud IP.\n"
+            )
+
         text = (
             f"🔍 <b>Live Scout Diagnostic: @{html.escape(clean_user)}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚠️ <b>Profile Status:</b> Could not load reels from profile.\n\n"
-            "💡 <b>Possible reasons:</b>\n"
-            "• Account is <b>private</b> or username is misspelled.\n"
-            "• Account has not posted any public reels yet.\n"
-            "• Instagram temporary rate-limit or login challenge on cloud IP.\n\n"
+            f"⚠️ <b>Profile Status:</b> {status_title}\n\n"
+            "💡 <b>Diagnostic Details:</b>\n"
+            f"{status_body}\n"
             "🔄 <i>Tap <b>Re-Check Now</b> below to retry inspection!</i>\n\n"
             f"🎯 <i>Configured target: ❤️ {l_str}+ likes | 📅 Max {d_str}</i>"
         )
         return text, reply_markup
+
 
     # Profile reachable! Find newest valid video reel among shortcodes (skipping photos)
     latest_sc = shortcodes[0]

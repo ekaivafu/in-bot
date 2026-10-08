@@ -71,9 +71,10 @@ _worker_id_raw = os.getenv("WORKER_ID", "").strip()
 WORKER_ID: int | None = int(_worker_id_raw) if _worker_id_raw.isdigit() else None
 
 # ── Optional Proxy Pool Rotation (e.g. Webshare 10 free proxies or custom) ───
-_RAW_PROXIES = [p.strip() for p in os.getenv("PROXY_POOL", "").split(",") if p.strip()]
+_RAW_PROXIES = [p.strip() for p in (os.getenv("PROXY_POOL", "") or os.getenv("PROXIES", "")).split(",") if p.strip()]
 _proxy_index = 0
 _proxy_lock = threading.Lock()
+
 
 
 def get_next_proxy() -> str | None:
@@ -123,24 +124,103 @@ def start_health_server(port: int = PORT) -> None:
 
 
 # ── Creator Profile Scraper ────────────────────────────────────────────────────
-def fetch_creator_reel_shortcodes(username: str) -> list[str]:
+_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def pk_to_shortcode(pk: int | str) -> str:
+    """Convert Instagram internal numeric media PK to base64 shortcode."""
+    try:
+        pk_int = int(pk)
+        if pk_int <= 0:
+            return ""
+        shortcode = []
+        while pk_int > 0:
+            remainder = pk_int % 64
+            shortcode.append(_BASE64_ALPHABET[remainder])
+            pk_int //= 64
+        return "".join(reversed(shortcode))
+    except Exception:
+        return ""
+
+
+def _extract_from_relay_payload(html: str) -> tuple[list[str], bool]:
     """
-    Fetch public creator profile HTML using Chrome 124 TLS impersonation.
-    Queries /reels/ tab (reels feed) and profile root.
-    Extracts shortcodes from both embedded JSON ("code": "...") and HTML links.
+    Extracts video reel shortcodes and confirms profile existence from Meta's
+    Server-Side Rendered RelayPreloader JSON.
+    Returns (list_of_video_shortcodes, user_exists).
+    """
+    shortcodes = []
+    seen = set()
+    user_exists = False
+
+    for s in html.split("<script"):
+        if "PolarisLoggedOutMobileProfileRootQueryRelayPreloader" in s or "xig_user_by_igid_v2" in s:
+            user_exists = True
+
+        if "PolarisProfilePostsLoggedOutTabGridUIContentQueryRelayPreloader" in s and "polaris_timeline_connection" in s:
+            user_exists = True
+            m = re.search(r'data-sjs>({.*})', s)
+            if not m:
+                m = re.search(r'>({.*?})</script>', s)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+
+                    def find_edges(obj):
+                        if isinstance(obj, dict):
+                            if "polaris_timeline_connection" in obj:
+                                return obj["polaris_timeline_connection"].get("edges", [])
+                            for v in obj.values():
+                                res = find_edges(v)
+                                if res:
+                                    return res
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                res = find_edges(item)
+                                if res:
+                                    return res
+                        return []
+
+                    edges = find_edges(data)
+                    for edge in edges:
+                        node = edge.get("node", {})
+                        pk = node.get("pk")
+                        typename = node.get("__typename", "")
+                        is_video = typename in ("XIGPolarisVideoMedia", "XIGPolarisClipsMedia") or node.get("is_video", False)
+                        if pk and is_video:
+                            sc = pk_to_shortcode(pk)
+                            if sc and sc not in seen:
+                                seen.add(sc)
+                                shortcodes.append(sc)
+                except Exception:
+                    pass
+
+    return shortcodes, user_exists
+
+
+def fetch_creator_reel_shortcodes(username: str, return_details: bool = False):
+    """
+    Multi-strategy resilient scraper to retrieve latest video reels for a creator profile.
+    
+    Strategies:
+    1. Search Crawler Relay (Googlebot & Bingbot): Meta explicitly serves complete Relay
+       preloader JSON containing timeline post PKs to search engines without 302 login
+       redirects, completely bypassing datacenter IP blocks on Render/cloud hosting.
+    2. Session-bootstrapped desktop browser: Obtains anonymous device cookies before requesting profile.
+    3. Proxy routing: Automatically routes through PROXY_POOL / PROXIES if configured.
+    
+    Returns:
+    - If return_details=False: list[str] of shortcodes (backward compatible).
+    - If return_details=True: tuple[list[str], dict] with diagnostic telemetry.
     """
     clean_user = username.strip().lstrip("@").lower()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Dest": "document",
+
+    diag = {
+        "status": "empty",
+        "strategy": "none",
+        "http_status": 0,
+        "user_exists": False,
+        "error": None,
     }
 
     proxy = get_next_proxy()
@@ -148,41 +228,115 @@ def fetch_creator_reel_shortcodes(username: str) -> list[str]:
     if proxy:
         logger.info("Routing scrape @%s through proxy: %s", clean_user, proxy.split("@")[-1] if "@" in proxy else proxy)
 
-    target_urls = [
-        f"https://www.instagram.com/{clean_user}/reels/",
-        f"https://www.instagram.com/{clean_user}/",
+    # ── Strategy 1: Search Crawler Relay (Googlebot & Bingbot) ─────────────────
+    # Whitelisted by Meta's edge servers; bypasses cloud/datacenter login walls.
+    crawlers = [
+        ("googlebot", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"),
+        ("bingbot", "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)"),
     ]
 
-    seen = set()
-    unique_shortcodes = []
-
-    for target_url in target_urls:
+    for strat_name, ua in crawlers:
         try:
-            r = requests.get(target_url, impersonate="chrome124", headers=headers, proxies=proxies_dict, timeout=15)
-            if r.status_code != 200:
-                logger.warning("Scrape %s returned HTTP %s", target_url, r.status_code)
-                continue
-            if "accounts/login" in str(r.url).lower():
-                logger.warning("Scrape %s redirected to login page", target_url)
-                continue
-
-            # Extract from embedded JSON ("code": "XYZ" or "shortcode": "XYZ")
-            json_codes = re.findall(r'["\'](?:code|shortcode)["\']\s*:\s*["\']([A-Za-z0-9_-]{11})["\']', r.text)
-            # Extract from HTML anchor links (/reel/XYZ or /p/XYZ)
-            html_codes = re.findall(r'/(?:reel|p)/([A-Za-z0-9_-]{11})', r.text)
-
-            for sc in (json_codes + html_codes):
-                if sc not in seen:
-                    seen.add(sc)
-                    unique_shortcodes.append(sc)
-
-            if len(unique_shortcodes) >= 6:
-                break
+            r = requests.get(
+                f"https://www.instagram.com/{clean_user}/",
+                headers={
+                    "User-Agent": ua,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                impersonate="chrome124",
+                proxies=proxies_dict,
+                timeout=12,
+            )
+            diag["http_status"] = r.status_code
+            if r.status_code == 200 and "accounts/login" not in str(r.url).lower():
+                scs, user_exists = _extract_from_relay_payload(r.text)
+                diag["user_exists"] = user_exists
+                if scs:
+                    diag["status"] = "ok"
+                    diag["strategy"] = strat_name
+                    logger.info("Found %d video reels on @%s via %s relay", len(scs), clean_user, strat_name)
+                    return (scs, diag) if return_details else scs
+                elif not user_exists:
+                    diag["status"] = "not_found"
         except Exception as exc:
-            logger.debug("Scrape error on %s: %s", target_url, exc)
+            logger.debug("Crawler relay %s error on @%s: %s", strat_name, clean_user, exc)
+            diag["error"] = str(exc)
 
-    logger.info("Found %d recent reels on @%s profile", len(unique_shortcodes), clean_user)
-    return unique_shortcodes
+    # ── Strategy 2: Session-bootstrapped Desktop Browser TLS ─────────────────
+    try:
+        s = requests.Session(impersonate="chrome124")
+        if proxies_dict:
+            s.proxies = proxies_dict
+
+        # Bootstrap anonymous device & CSRF cookies
+        try:
+            s.get(
+                "https://www.instagram.com/?__a=1&__d=dis",
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "x-ig-app-id": "936619743392459",
+                },
+                timeout=8,
+            )
+        except Exception:
+            pass
+
+        target_urls = [
+            f"https://www.instagram.com/{clean_user}/reels/",
+            f"https://www.instagram.com/{clean_user}/",
+        ]
+
+        seen = set()
+        desktop_shortcodes = []
+
+        for target_url in target_urls:
+            r = s.get(
+                target_url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=12,
+            )
+            diag["http_status"] = r.status_code
+            if r.status_code == 200:
+                if "accounts/login" in str(r.url).lower():
+                    diag["status"] = "login_challenge"
+                    continue
+
+                json_codes = re.findall(r'["\'](?:code|shortcode)["\']\s*:\s*["\']([A-Za-z0-9_-]{11})["\']', r.text)
+                html_codes = re.findall(r'/(?:reel|p)/([A-Za-z0-9_-]{11})', r.text)
+                for sc in (json_codes + html_codes):
+                    if sc not in seen:
+                        seen.add(sc)
+                        desktop_shortcodes.append(sc)
+
+                if len(desktop_shortcodes) >= 6:
+                    break
+            elif r.status_code == 429:
+                diag["status"] = "rate_limited"
+
+        if desktop_shortcodes:
+            diag["status"] = "ok"
+            diag["strategy"] = "session_desktop"
+            logger.info("Found %d reels on @%s via desktop session", len(desktop_shortcodes), clean_user)
+            return (desktop_shortcodes, diag) if return_details else desktop_shortcodes
+    except Exception as exc:
+        logger.debug("Desktop session error on @%s: %s", clean_user, exc)
+        diag["error"] = str(exc)
+
+    logger.warning("Could not extract reels for @%s (status=%s, diag=%s)", clean_user, diag["status"], diag)
+    return ([], diag) if return_details else []
 
 
 class SilentLogger:
@@ -216,6 +370,9 @@ def evaluate_reel(shortcode: str, creator: str) -> tuple[dict | None, int]:
     }
     if proxy:
         ydl_opts["proxy"] = proxy
+    cookie_file = downloader.find_cookies_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(cookie_file)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -298,6 +455,9 @@ def inspect_single_reel_meta(shortcode: str) -> dict:
     }
     if proxy:
         ydl_opts["proxy"] = proxy
+    cookie_file = downloader.find_cookies_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(cookie_file)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
