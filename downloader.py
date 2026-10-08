@@ -242,10 +242,13 @@ def _get_random_anti_detect_params() -> dict:
     for EVERY processed video.
     Guarantees:
     - Unique cryptographic hash (MD5, SHA-256) per video
-    - Unique perceptual hash (pHash) altering DCT frequency coefficients
-    - Random realistic device profile (iPhone, Samsung, Pixel, Premiere, etc.)
-    - Random creation time with realistic micro-jitter
-    - Zero visible distortion to human viewers
+    - Defeats spatial grid fingerprinting (via dynamic micro-crop + Lanczos re-scaling)
+    - Defeats temporal keyframe/scene matching (via micro-speed 1.01x shift on video & audio)
+    - Defeats DCT frequency & perceptual hash matching (via color micro-eq + dynamic temporal grain)
+    - Defeats edge detection models (via subtle unsharp filter)
+    - Defeats acoustic audio fingerprinting (via atempo + volume jitter + bitrate variation)
+    - Realistic camera color space (BT.709) & device profile (iPhone, Samsung, Pixel, Premiere)
+    - Zero visible distortion or degradation to human viewers
     """
     profile = random.choice(DEVICE_PROFILES)
 
@@ -254,14 +257,32 @@ def _get_random_anti_detect_params() -> dict:
     creation_dt = datetime.now(timezone.utc) - timedelta(seconds=jitter_sec)
     iso_time = creation_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Randomized imperceptible visual micro-adjustments
-    contrast = round(random.uniform(1.002, 1.006), 4)
-    brightness = round(random.uniform(0.0008, 0.0022), 4)
-    saturation = round(random.uniform(1.001, 1.005), 4)
-    gamma = round(random.uniform(0.998, 1.002), 4)
+    # 1. Spatial micro-crop (trims 4-8px width, 6-12px height, then scales back to original resolution)
+    crop_w = random.choice([4, 6, 8])
+    crop_h = random.choice([6, 8, 10, 12])
+    crop_filter = f"crop=in_w-{crop_w}:in_h-{crop_h},scale=iw+{crop_w}:ih+{crop_h}:flags=lanczos"
 
-    # Randomized audio micro-adjustments
+    # 2. Temporal speed micro-shift (imperceptible 1-1.5% speed change shifts every motion vector and cut)
+    speed = round(random.choice([random.uniform(1.008, 1.018), random.uniform(0.986, 0.994)]), 4)
+    v_speed = f"setpts=PTS/{speed}"
+    a_speed = f"atempo={speed}"
+
+    # 3. Micro-color & frequency equalization (alters DCT coefficients)
+    contrast = round(random.uniform(1.003, 1.007), 4)
+    brightness = round(random.uniform(0.001, 0.0025), 4)
+    saturation = round(random.uniform(1.002, 1.006), 4)
+    gamma = round(random.uniform(0.997, 1.003), 4)
+    eq_filter = f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma}"
+
+    # 4. Subtle temporal grain noise & sharpening (breaks blockhash and pHash)
+    noise_filter = "noise=c0s=1:c0f=t"
+    unsharp_filter = "unsharp=3:3:0.2"
+
+    # Composite video and audio filters
+    vf = f"{crop_filter},{eq_filter},{noise_filter},{unsharp_filter},{v_speed}"
     vol_scale = round(random.uniform(0.9985, 1.0015), 4)
+    af = f"{a_speed},volume={vol_scale}"
+
     audio_bitrate = random.choice(["128k", "132k", "125k", "130k"])
     crf_val = str(random.choice([21, 22]))
 
@@ -280,8 +301,9 @@ def _get_random_anti_detect_params() -> dict:
     return {
         "profile": profile["name"],
         "iso_time": iso_time,
-        "vf": f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma}",
-        "af": f"volume={vol_scale}",
+        "speed": speed,
+        "vf": vf,
+        "af": af,
         "audio_bitrate": audio_bitrate,
         "crf": crf_val,
         "metadata_args": metadata_args,
@@ -294,19 +316,21 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     1. Wipes ALL original tracking metadata (-map_metadata -1).
     2. Injects a randomized realistic device profile (iPhone, Samsung, Pixel, Premiere Pro, etc.)
        with randomized creation time, camera tags, and encoder strings unique to every video.
-    3. Applies imperceptible randomized pixel/color micro-adjustments (contrast, brightness, saturation, gamma)
-       that mathematically change DCT coefficients and generate fresh cryptographic & perceptual hashes (pHash).
-    4. Micro-adjusts audio waveform & bitrate so audio hash is also unique.
-    5. Limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
-    6. Optimizes container with -movflags +faststart.
-    7. Fast fallback to stream copy with randomized metadata if re-encoding times out or exceeds 35MB.
+    3. Breaks spatial hashing via randomized micro-crop + Lanczos re-scaling.
+    4. Breaks temporal cut matching via micro-speed shift (1.01x) on video & audio.
+    5. Breaks pHash / DCT frequency matching via color micro-eq + dynamic temporal grain.
+    6. Breaks edge detection models via subtle unsharp filter.
+    7. Breaks acoustic audio fingerprinting via atempo + volume jitter.
+    8. Sets standard mobile camera BT.709 color primaries.
+    9. Strictly limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
+    10. Fast fallback to stream copy with randomized metadata if re-encoding times out or exceeds 35MB.
     """
     if not shutil.which("ffmpeg"):
         logger.warning("ffmpeg not found - skipping video protection.")
         return False
 
     params = _get_random_anti_detect_params()
-    logger.info("Applying anti-detection profile '%s' with fresh hash: %s", params["profile"], output_path.name)
+    logger.info("Applying ultra anti-detection profile '%s' (speed=%.4fx): %s", params["profile"], params["speed"], output_path.name)
 
     # If file is unusually large (> 35MB), prefer fast stream copy to avoid Render memory timeouts
     file_size_mb = input_path.stat().st_size / (1024 * 1024) if input_path.exists() else 0
@@ -338,6 +362,7 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
         "-vf", params["vf"],
         "-af", params["af"],
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", params["crf"],
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
         "-c:a", "aac", "-b:a", params["audio_bitrate"],
         *params["metadata_args"],
         "-movflags", "+faststart",
