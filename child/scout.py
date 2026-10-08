@@ -227,22 +227,27 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
         now_dt = datetime.now(timezone.utc)
         age_days = (now_dt - upload_dt).total_seconds() / 86400.0
 
+        # Retrieve target thresholds for this creator (configured by users or admin)
+        targets = database.get_creator_target_thresholds(creator)
+        target_min_likes = targets.get("min_likes", MIN_LIKES)
+        target_max_days = targets.get("max_days", MAX_AGE_DAYS)
+
         logger.info(
-            "Inspecting %s (@%s): %s likes, %.2f days old (uploaded %s)",
-            shortcode, creator, f"{likes:,}", age_days, upload_date_str
+            "Inspecting %s (@%s): %s likes, %.2f days old (targets: >=%d likes, <=%.1fd, uploaded %s)",
+            shortcode, creator, f"{likes:,}", age_days, target_min_likes, target_max_days, upload_date_str
         )
 
-        # Check age constraint: 0 to MAX_AGE_DAYS
-        if age_days > MAX_AGE_DAYS:
-            logger.info("Reel %s is %.1f days old (> %.1f limit). Marking seen.", shortcode, age_days, MAX_AGE_DAYS)
+        # Check age constraint: 0 to target_max_days
+        if age_days > target_max_days:
+            logger.info("Reel %s is %.1f days old (> %.1f limit for @%s). Marking seen.", shortcode, age_days, target_max_days, creator)
             database.record_seen_reel(shortcode, creator, likes, upload_date_str, status="passed_too_old")
             return None
 
-        # Check likes constraint: >= MIN_LIKES
-        if likes < MIN_LIKES:
-            logger.info("Reel %s likes (%d) < minimum (%d).", shortcode, likes, MIN_LIKES)
-            # If reel is already 3+ days old and hasn't hit 5k, mark permanently passed
-            if age_days >= 3.0:
+        # Check likes constraint: >= target_min_likes
+        if likes < target_min_likes:
+            logger.info("Reel %s likes (%d) < target minimum (%d) for @%s.", shortcode, likes, target_min_likes, creator)
+            # If reel is already beyond target age, mark permanently passed
+            if age_days >= min(3.0, target_max_days):
                 database.record_seen_reel(shortcode, creator, likes, upload_date_str, status="passed_below_likes")
             return None
 
@@ -342,8 +347,8 @@ async def process_viral_reel(reel_data: dict, bot_token: str, chat_id: int | str
 
     logger.info("🎉 Video uploaded successfully! Telegram file_id: %s", file_id[:25] + "...")
 
-    # 3. Auto-dispatch to all user subscribers of this creator in 1 single message
-    subscribers = database.get_subscribers_for_creator(creator)
+    # 3. Auto-dispatch to all user subscribers of this creator whose personal targets match
+    subscribers = database.get_subscribers_for_creator_filtered(creator, likes=likes, age_days=age_days)
     admin_id_int = int(chat_id) if str(chat_id).lstrip("-").isdigit() else 0
     for sub_id in subscribers:
         if sub_id != admin_id_int:

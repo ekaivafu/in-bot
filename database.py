@@ -323,6 +323,10 @@ def init_db() -> None:
                         );
 
                         ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER DEFAULT NULL;
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS min_likes INTEGER DEFAULT 5000;
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS max_days REAL DEFAULT 5.0;
+                        ALTER TABLE user_watchlist ADD COLUMN IF NOT EXISTS min_likes INTEGER DEFAULT 5000;
+                        ALTER TABLE user_watchlist ADD COLUMN IF NOT EXISTS max_days REAL DEFAULT 5.0;
                     """)
 
                     # Check if migration needed
@@ -443,10 +447,17 @@ def init_db() -> None:
                 );
             """)
 
-            try:
-                cur.execute("ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL")
-            except Exception:
-                pass
+            for stmt in [
+                "ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL",
+                "ALTER TABLE creator_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
+                "ALTER TABLE creator_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+                "ALTER TABLE user_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
+                "ALTER TABLE user_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+            ]:
+                try:
+                    cur.execute(stmt)
+                except Exception:
+                    pass
             _load_caches(cur)
         logger.info("Database initialized (SQLite mode with in-memory caching)")
 
@@ -822,31 +833,38 @@ def update_cached_audio(shortcode: str, audio_file_id: str) -> None:
 
 
 # ── Scout & Watchlist Helpers (for Child Worker) ──────────────────────────────
-def add_watchlist_creator(username: str, added_by: int = 0) -> bool:
+def add_watchlist_creator(username: str, added_by: int = 0, min_likes: int = 5000, max_days: float = 5.0) -> bool:
     """Add a creator username to the scout watchlist and assign to least-loaded worker."""
     clean_user = username.strip().lstrip("@").lower()
     if not clean_user:
         return False
+    if min_likes < 1:
+        min_likes = 1
+    if max_days < 0.1:
+        max_days = 0.1
     try:
-        placeholder = "%s" if USE_POSTGRES else "?"
         with get_db_cursor() as cur:
             if USE_POSTGRES:
                 cur.execute(
                     """
-                    INSERT INTO creator_watchlist (username, added_by, active)
-                    VALUES (%s, %s, TRUE)
-                    ON CONFLICT (username) DO UPDATE SET active = TRUE
+                    INSERT INTO creator_watchlist (username, added_by, active, min_likes, max_days)
+                    VALUES (%s, %s, TRUE, %s, %s)
+                    ON CONFLICT (username) DO UPDATE SET active = TRUE,
+                        min_likes = LEAST(creator_watchlist.min_likes, EXCLUDED.min_likes),
+                        max_days = GREATEST(creator_watchlist.max_days, EXCLUDED.max_days)
                     """,
-                    (clean_user, added_by),
+                    (clean_user, added_by, min_likes, max_days),
                 )
             else:
                 cur.execute(
                     """
-                    INSERT INTO creator_watchlist (username, added_by, active)
-                    VALUES (?, ?, 1)
-                    ON CONFLICT (username) DO UPDATE SET active = 1
+                    INSERT INTO creator_watchlist (username, added_by, active, min_likes, max_days)
+                    VALUES (?, ?, 1, ?, ?)
+                    ON CONFLICT (username) DO UPDATE SET active = 1,
+                        min_likes = MIN(COALESCE(creator_watchlist.min_likes, 5000), excluded.min_likes),
+                        max_days = MAX(COALESCE(creator_watchlist.max_days, 5.0), excluded.max_days)
                     """,
-                    (clean_user, added_by),
+                    (clean_user, added_by, min_likes, max_days),
                 )
         # Assign to least-loaded child server if cluster is active
         assign_creator_to_least_loaded_worker(clean_user)
@@ -886,6 +904,107 @@ def get_active_watchlist() -> list[str]:
     except Exception as exc:
         logger.warning("get_active_watchlist error: %s", exc)
         return []
+
+
+def get_active_watchlist_with_targets() -> list[dict]:
+    """Return all active creators with target min_likes and max_days."""
+    try:
+        with get_db_cursor() as cur:
+            active_clause = "active = TRUE" if USE_POSTGRES else "active = 1"
+            cur.execute(
+                f"""
+                SELECT username, COALESCE(min_likes, 5000), COALESCE(max_days, 5.0), COALESCE(assigned_worker_id, 0)
+                FROM creator_watchlist
+                WHERE {active_clause}
+                ORDER BY id ASC
+                """
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "username": r[0],
+                    "min_likes": int(r[1]),
+                    "max_days": float(r[2]),
+                    "worker_id": r[3],
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("get_active_watchlist_with_targets error: %s", exc)
+        return []
+
+
+def get_creator_target_thresholds(creator: str) -> dict:
+    """
+    Computes effective target thresholds for a creator.
+    Uses the lowest min_likes and highest max_days among all active subscribers,
+    falling back to creator_watchlist settings or default (5000 likes, 5.0 days).
+    """
+    clean_user = creator.strip().lstrip("@").lower()
+    default_res = {"min_likes": 5000, "max_days": 5.0}
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            # 1. Check all user subscribers
+            cur.execute(
+                f"""
+                SELECT MIN(min_likes), MAX(max_days)
+                FROM user_watchlist
+                WHERE username = {placeholder}
+                """,
+                (clean_user,),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return {
+                    "min_likes": int(row[0]),
+                    "max_days": float(row[1]) if row[1] is not None else 5.0,
+                }
+
+            # 2. Check creator_watchlist directly
+            cur.execute(
+                f"""
+                SELECT min_likes, max_days
+                FROM creator_watchlist
+                WHERE username = {placeholder}
+                LIMIT 1
+                """,
+                (clean_user,),
+            )
+            row_c = cur.fetchone()
+            if row_c and row_c[0] is not None:
+                return {
+                    "min_likes": int(row_c[0]),
+                    "max_days": float(row_c[1]) if row_c[1] is not None else 5.0,
+                }
+        return default_res
+    except Exception as exc:
+        logger.warning("get_creator_target_thresholds error for %s: %s", clean_user, exc)
+        return default_res
+
+
+def set_creator_global_targets(creator: str, min_likes: int, max_days: float) -> bool:
+    """Admin function: update target min_likes and max_days in creator_watchlist."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if min_likes < 1:
+        min_likes = 1
+    if max_days < 0.1:
+        max_days = 0.1
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE creator_watchlist
+                SET min_likes = {placeholder}, max_days = {placeholder}
+                WHERE username = {placeholder}
+                """,
+                (min_likes, max_days, clean_user),
+            )
+            return True
+    except Exception as exc:
+        logger.warning("set_creator_global_targets error for %s: %s", clean_user, exc)
+        return False
 
 
 def is_reel_seen(shortcode: str) -> bool:
@@ -1136,9 +1255,106 @@ def get_user_watchlist_count(user_id: int) -> int:
     return len(get_user_watchlist(user_id))
 
 
-def add_user_watchlist_creator(user_id: int, username: str, is_admin_user: bool = False) -> tuple[bool, str]:
+def get_user_watchlist_details(user_id: int) -> list[dict]:
+    """Retrieve all creator accounts tracked by user with their target likes and max days."""
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT username, COALESCE(min_likes, 5000), COALESCE(max_days, 5.0)
+                FROM user_watchlist
+                WHERE user_id = {placeholder}
+                ORDER BY id ASC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "username": r[0],
+                    "min_likes": int(r[1]),
+                    "max_days": float(r[2]),
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.warning("get_user_watchlist_details error for %s: %s", user_id, exc)
+        return []
+
+
+def get_user_creator_targets(user_id: int, creator: str) -> dict:
+    """Retrieve specific user's targets for a creator."""
+    clean_user = creator.strip().lstrip("@").lower()
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT COALESCE(min_likes, 5000), COALESCE(max_days, 5.0)
+                FROM user_watchlist
+                WHERE user_id = {placeholder} AND username = {placeholder}
+                LIMIT 1
+                """,
+                (user_id, clean_user),
+            )
+            row = cur.fetchone()
+            if row:
+                return {"min_likes": int(row[0]), "max_days": float(row[1])}
+        return {"min_likes": 5000, "max_days": 5.0}
+    except Exception as exc:
+        logger.warning("get_user_creator_targets error: %s", exc)
+        return {"min_likes": 5000, "max_days": 5.0}
+
+
+def set_user_watchlist_targets(user_id: int, creator: str, min_likes: int, max_days: float) -> bool:
+    """Update target likes and days for a specific user and creator."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if min_likes < 1:
+        min_likes = 1
+    if max_days < 0.1:
+        max_days = 0.1
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE user_watchlist
+                SET min_likes = {placeholder}, max_days = {placeholder}
+                WHERE user_id = {placeholder} AND username = {placeholder}
+                """,
+                (min_likes, max_days, user_id, clean_user),
+            )
+            # Sync creator_watchlist if user target is lower
+            if USE_POSTGRES:
+                cur.execute(
+                    """
+                    UPDATE creator_watchlist
+                    SET min_likes = LEAST(creator_watchlist.min_likes, %s),
+                        max_days = GREATEST(creator_watchlist.max_days, %s)
+                    WHERE username = %s
+                    """,
+                    (min_likes, max_days, clean_user),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE creator_watchlist
+                    SET min_likes = MIN(COALESCE(creator_watchlist.min_likes, 5000), ?),
+                        max_days = MAX(COALESCE(creator_watchlist.max_days, 5.0), ?)
+                    WHERE username = ?
+                    """,
+                    (min_likes, max_days, clean_user),
+                )
+            return True
+    except Exception as exc:
+        logger.warning("set_user_watchlist_targets error for %s: %s", clean_user, exc)
+        return False
+
+
+def add_user_watchlist_creator(user_id: int, username: str, is_admin_user: bool = False, min_likes: int = 5000, max_days: float = 5.0) -> tuple[bool, str]:
     """
-    Add a creator to a user's watchlist with slot limit enforcement.
+    Add a creator to a user's watchlist with slot limit enforcement and custom targets.
     Returns:
       (True, "added")           - Successfully added
       (False, "limit_reached")  - User hit their slot limit (default 1)
@@ -1148,6 +1364,11 @@ def add_user_watchlist_creator(user_id: int, username: str, is_admin_user: bool 
     clean_user = username.strip().lstrip("@").lower()
     if not clean_user or not user_id:
         return False, "invalid"
+
+    if min_likes < 1:
+        min_likes = 1
+    if max_days < 0.1:
+        max_days = 0.1
 
     # Enforce slot limit (admin has unlimited slots)
     if not is_admin_user:
@@ -1162,16 +1383,16 @@ def add_user_watchlist_creator(user_id: int, username: str, is_admin_user: bool 
         return False, "already_exists"
 
     try:
-        # 1. Insert into user_watchlist
+        # 1. Insert into user_watchlist with targets
         placeholder = "%s" if USE_POSTGRES else "?"
         with get_db_cursor() as cur:
             cur.execute(
-                f"INSERT INTO user_watchlist (user_id, username) VALUES ({placeholder}, {placeholder})",
-                (user_id, clean_user),
+                f"INSERT INTO user_watchlist (user_id, username, min_likes, max_days) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})",
+                (user_id, clean_user, min_likes, max_days),
             )
 
         # 2. Ensure creator is active in global scout creator_watchlist
-        add_watchlist_creator(clean_user, added_by=user_id)
+        add_watchlist_creator(clean_user, added_by=user_id, min_likes=min_likes, max_days=max_days)
         return True, "added"
     except Exception as exc:
         logger.warning("add_user_watchlist_creator error for user %s, creator %s: %s", user_id, clean_user, exc)
@@ -1222,6 +1443,31 @@ def get_subscribers_for_creator(creator: str) -> list[int]:
             return [int(r[0]) for r in rows if r and r[0]]
     except Exception as exc:
         logger.warning("get_subscribers_for_creator error for %s: %s", clean_user, exc)
+        return []
+
+
+def get_subscribers_for_creator_filtered(creator: str, likes: int, age_days: float) -> list[int]:
+    """Retrieve all user IDs monitoring a creator whose targets match the reel."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if not clean_user:
+        return []
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT user_id
+                FROM user_watchlist
+                WHERE username = {placeholder}
+                  AND COALESCE(min_likes, 5000) <= {placeholder}
+                  AND COALESCE(max_days, 5.0) >= {placeholder}
+                """,
+                (clean_user, likes, age_days),
+            )
+            rows = cur.fetchall()
+            return [int(r[0]) for r in rows if r and r[0]]
+    except Exception as exc:
+        logger.warning("get_subscribers_for_creator_filtered error for %s: %s", clean_user, exc)
         return []
 
 

@@ -66,15 +66,22 @@ from database import (
     add_watchlist_creator,
     remove_watchlist_creator,
     get_active_watchlist,
+    get_active_watchlist_with_targets,
+    get_creator_target_thresholds,
+    set_creator_global_targets,
     get_pending_viral_reels,
     mark_viral_reel_dispatched,
     get_subscribers_for_creator,
+    get_subscribers_for_creator_filtered,
     get_user_scout_limit,
     set_user_scout_limit,
     get_user_info,
     get_user_id_by_username,
     get_all_custom_limits,
     get_user_watchlist,
+    get_user_watchlist_details,
+    get_user_creator_targets,
+    set_user_watchlist_targets,
     get_user_watchlist_count,
     add_user_watchlist_creator,
     remove_user_watchlist_creator,
@@ -444,11 +451,52 @@ def rkb_admin() -> ReplyKeyboardMarkup:
 
 
 # ── Watchlist, Cluster, and Scout Inline UI Builders ──────────────────────────
+def parse_target_likes_days(text: str, default_likes: int = 5000, default_days: float = 5.0) -> tuple[int, float]:
+    """Parses input strings like '50 3', '1k 2d', '500', '2500 1.5' into (likes, days)."""
+    parts = text.strip().split()
+    likes = default_likes
+    days = default_days
+    if not parts:
+        return likes, days
+
+    # Part 0: likes
+    raw_l = parts[0].lower().replace(",", "").replace("+", "").strip()
+    if raw_l.endswith("k"):
+        try:
+            likes = int(float(raw_l[:-1]) * 1000)
+        except ValueError:
+            pass
+    elif raw_l.endswith("m"):
+        try:
+            likes = int(float(raw_l[:-1]) * 1000000)
+        except ValueError:
+            pass
+    else:
+        try:
+            likes = int(raw_l)
+        except ValueError:
+            pass
+
+    # Part 1: days (if provided)
+    if len(parts) > 1:
+        raw_d = parts[1].lower().replace("d", "").replace("days", "").replace("day", "").strip()
+        try:
+            days = float(raw_d)
+        except ValueError:
+            pass
+
+    if likes < 1:
+        likes = 1
+    if days < 0.1:
+        days = 0.1
+    return likes, days
+
+
 def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Generate dynamic text and interactive inline keyboard for personal watchlist."""
     admin_flag = is_admin(user_id)
     user_limit = get_user_scout_limit(user_id)
-    my_creators = get_user_watchlist(user_id)
+    my_creators = get_user_watchlist_details(user_id)
     limit_str = "Unlimited 👑" if admin_flag else f"{user_limit}"
 
     text = (
@@ -457,9 +505,15 @@ def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📊 <b>Active Slots:</b> <b>{len(my_creators)} / {limit_str}</b>\n\n"
     )
     if my_creators:
-        text += "<b>Monitored Creators:</b>\n"
-        text += "\n".join(f"  • @{html.escape(c)}" for c in my_creators) + "\n\n"
-        text += "🚀 <i>Viral reels (5k+ likes, 0–5 days) from these accounts will be auto-delivered here!</i>\n"
+        text += "<b>Monitored Creators & Targets:</b>\n"
+        for item in my_creators:
+            c = item["username"]
+            l = item["min_likes"]
+            d = item["max_days"]
+            d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
+            l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
+            text += f"  • <b>@{html.escape(c)}</b> (❤️ <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>)\n"
+        text += "\n🚀 <i>Viral reels matching your targets will be automatically downloaded and delivered here!</i>\n"
     else:
         text += "<i>You are not monitoring any creators yet.</i>\n\n"
         text += "Tap <b>➕ Add Creator</b> below to start monitoring!\n"
@@ -467,11 +521,99 @@ def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     buttons = []
     row1 = [InlineKeyboardButton("➕ Add Creator", callback_data="watch_add_btn")]
     if my_creators:
-        row1.append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="watch_del_menu"))
-    buttons.append(row1)
-    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh")])
+        row1.append(InlineKeyboardButton("⚙️ Edit Targets", callback_data="watch_tgt_menu"))
+        buttons.append(row1)
+        buttons.append([
+            InlineKeyboardButton("🗑️ Remove Creator", callback_data="watch_del_menu"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh"),
+        ])
+    else:
+        buttons.append(row1)
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh")])
 
     return text, InlineKeyboardMarkup(buttons)
+
+
+def build_target_editor_text(user_id: int, creator: str, is_admin_mode: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds interactive UI for configuring min likes and max days for a creator."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if is_admin_mode:
+        targets = get_creator_target_thresholds(clean_user)
+    else:
+        targets = get_user_creator_targets(user_id, clean_user)
+
+    min_l = targets.get("min_likes", 5000)
+    max_d = targets.get("max_days", 5.0)
+    d_str = f"{int(max_d)}d" if max_d.is_integer() else f"{max_d:.1f}d"
+    l_str = f"{min_l//1000}k" if min_l >= 1000 and min_l % 1000 == 0 else f"{min_l:,}"
+
+    prefix = "adm" if is_admin_mode else "usr"
+
+    text = (
+        f"⚙️ <b>Configure Targets for @{html.escape(clean_user)}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"❤️ <b>Minimum Likes:</b> <b>{l_str}+ likes</b>\n"
+        f"📅 <b>Maximum Age:</b> <b>Max {d_str} old</b>\n\n"
+        f"🎯 <i>Reels from @{html.escape(clean_user)} will only be delivered if they reach at least "
+        f"{l_str}+ likes and are no older than {d_str}.</i>\n\n"
+        "<b>👇 Tap a preset button below or customize:</b>"
+    )
+
+    buttons = [
+        # Likes presets row
+        [
+            InlineKeyboardButton(f"{'✅ ' if min_l == 50 else ''}❤️ 50", callback_data=f"{prefix}_tl:{clean_user}:50"),
+            InlineKeyboardButton(f"{'✅ ' if min_l == 200 else ''}❤️ 200", callback_data=f"{prefix}_tl:{clean_user}:200"),
+            InlineKeyboardButton(f"{'✅ ' if min_l == 1000 else ''}❤️ 1k", callback_data=f"{prefix}_tl:{clean_user}:1000"),
+            InlineKeyboardButton(f"{'✅ ' if min_l == 5000 else ''}❤️ 5k", callback_data=f"{prefix}_tl:{clean_user}:5000"),
+        ],
+        # Days presets row
+        [
+            InlineKeyboardButton(f"{'✅ ' if max_d == 1.0 else ''}📅 1d", callback_data=f"{prefix}_td:{clean_user}:1"),
+            InlineKeyboardButton(f"{'✅ ' if max_d == 2.0 else ''}📅 2d", callback_data=f"{prefix}_td:{clean_user}:2"),
+            InlineKeyboardButton(f"{'✅ ' if max_d == 3.0 else ''}📅 3d", callback_data=f"{prefix}_td:{clean_user}:3"),
+            InlineKeyboardButton(f"{'✅ ' if max_d == 7.0 else ''}📅 7d", callback_data=f"{prefix}_td:{clean_user}:7"),
+        ],
+        # Custom input button
+        [
+            InlineKeyboardButton("✍️ Set Custom Likes / Days", callback_data=f"{prefix}_tcustom:{clean_user}"),
+        ],
+        # Back button
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="adm_scout_refresh" if is_admin_mode else "watch_refresh"),
+        ],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def kb_user_targets_picker(user_id: int) -> InlineKeyboardMarkup:
+    """Generate inline buttons for selecting which creator to edit targets for."""
+    my_creators = get_user_watchlist_details(user_id)
+    buttons = []
+    for item in my_creators:
+        c = item["username"]
+        l = item["min_likes"]
+        d = item["max_days"]
+        d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
+        l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
+        buttons.append([InlineKeyboardButton(f"⚙️ @{c} ({l_str}+ ❤️ | {d_str})", callback_data=f"usr_settgt:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Watchlist", callback_data="watch_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def kb_admin_targets_picker() -> InlineKeyboardMarkup:
+    """Generate inline buttons for admin to select which creator to edit scout targets for."""
+    creators = get_active_watchlist_with_targets()
+    buttons = []
+    for item in creators:
+        c = item["username"]
+        l = item["min_likes"]
+        d = item["max_days"]
+        d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
+        l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
+        buttons.append([InlineKeyboardButton(f"🎯 @{c} ({l_str}+ ❤️ | {d_str})", callback_data=f"adm_settgt:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Scout", callback_data="adm_scout_refresh")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def kb_watchlist_delete(user_id: int) -> InlineKeyboardMarkup:
@@ -551,7 +693,8 @@ def kb_cluster_delete() -> InlineKeyboardMarkup:
 
 def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
     """Generate dynamic scout overview text and interactive buttons."""
-    creators = get_active_watchlist()
+    watchlist_items = get_active_watchlist_with_targets()
+    creators = [w["username"] for w in watchlist_items]
     pending = get_pending_viral_reels(limit=5)
     servers = get_active_child_servers()
 
@@ -559,13 +702,19 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
         "🎯 <b>Viral Reel Scout System</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
-        f"🖥️ <b>Connected Servers:</b> {len(servers)} servers\n"
+        f"🖥️ <b>Connected Servers:</b> {len(servers)} servers\n\n"
     )
-    if creators:
-        text += "   " + ", ".join(f"@{html.escape(c)}" for c in creators[:8])
-        if len(creators) > 8:
-            text += f" (+{len(creators)-8} more)"
-        text += "\n"
+    if watchlist_items:
+        text += "<b>Monitored Creators & Target Thresholds:</b>\n"
+        for item in watchlist_items[:10]:
+            c = item["username"]
+            l = item["min_likes"]
+            d = item["max_days"]
+            d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
+            l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
+            text += f"  • <b>@{html.escape(c)}</b> (🎯 <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>)\n"
+        if len(watchlist_items) > 10:
+            text += f"  <i>(+{len(watchlist_items)-10} more)</i>\n"
     else:
         text += "   <i>None yet.</i>\n"
 
@@ -579,8 +728,12 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
         ])
     row_add = [InlineKeyboardButton("➕ Add Creator", callback_data="adm_scout_add_btn")]
     if creators:
-        row_add.append(InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"))
-    buttons.append(row_add)
+        row_add.append(InlineKeyboardButton("⚙️ Edit Targets", callback_data="adm_scout_tgt_menu"))
+        buttons.append(row_add)
+        buttons.append([InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu")])
+    else:
+        buttons.append(row_add)
+
     buttons.append([
         InlineKeyboardButton("⚙️ Set User Slot Limit", callback_data="adm_setlimit_prompt"),
         InlineKeyboardButton("📋 View User Limits", callback_data="adm_view_limits"),
@@ -1232,7 +1385,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{E_NEON_RINGS} <b>Add Creator to Watchlist</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Send the Instagram username to monitor:\n"
-            "Example: <code>@nike</code> or <code>cristiano</code>\n\n"
+            "Example: <code>@nike</code> or <code>cool.moco 50 3</code>\n"
+            "<i>(You can optionally include target likes and max days)</i>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+        )
+
+    elif data == "watch_tgt_menu":
+        my_creators = get_user_watchlist_details(uid)
+        if not my_creators:
+            await q.answer("Your watchlist is empty! Add a creator first.", show_alert=True)
+            return
+        if len(my_creators) == 1:
+            text, kb = build_target_editor_text(uid, my_creators[0]["username"], is_admin_mode=False)
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await q.edit_message_text(
+                "⚙️ <b>Select Creator to Edit Targets</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap a creator below to customize minimum likes and maximum age:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_user_targets_picker(uid),
+            )
+
+    elif data.startswith("usr_settgt:"):
+        creator = data.split(":", 1)[1].strip()
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("usr_tl:"):
+        parts = data.split(":")
+        creator = parts[1].strip()
+        new_l = int(parts[2])
+        curr = get_user_creator_targets(uid, creator)
+        set_user_watchlist_targets(uid, creator, min_likes=new_l, max_days=curr.get("max_days", 5.0))
+        await q.answer(f"✅ Target updated: {new_l:,}+ likes!")
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("usr_td:"):
+        parts = data.split(":")
+        creator = parts[1].strip()
+        new_d = float(parts[2])
+        curr = get_user_creator_targets(uid, creator)
+        set_user_watchlist_targets(uid, creator, min_likes=curr.get("min_likes", 5000), max_days=new_d)
+        d_str = f"{int(new_d)}d" if new_d.is_integer() else f"{new_d:.1f}d"
+        await q.answer(f"✅ Target updated: Max {d_str} old!")
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=False)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("usr_tcustom:"):
+        creator = data.split(":", 1)[1].strip()
+        context.user_data["state"] = f"awaiting_usr_target_custom:{creator}"
+        await q.message.reply_html(
+            f"✍️ <b>Set Custom Target for @{html.escape(creator)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send your desired minimum likes and maximum age in days:\n\n"
+            "<b>Format:</b> <code>&lt;likes&gt; [days]</code>\n"
+            "<b>Examples:</b>\n"
+            "• <code>50 3</code> (50+ likes, max 3 days old)\n"
+            "• <code>100</code> (100+ likes, keep current days)\n"
+            "• <code>2500 1.5</code> (2,500 likes, max 1.5 days old)\n"
+            "• <code>1k 2d</code> (1,000 likes, max 2 days)\n\n"
             "Send /cancel to abort or tap below.",
             reply_markup=kb_cancel(),
         )
@@ -1331,7 +1545,67 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "➕ <b>Add Target Creator to Scout</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Send the Instagram creator username:\n"
-            "Example: <code>@cristiano</code> or <code>nike</code>\n\n"
+            "Example: <code>@cristiano</code> or <code>cool.moco 50 3</code>\n"
+            "<i>(You can optionally include target likes and max days)</i>\n\n"
+            "Send /cancel to abort or tap below.",
+            reply_markup=kb_cancel(),
+        )
+
+    elif data == "adm_scout_tgt_menu":
+        creators = get_active_watchlist_with_targets()
+        if not creators:
+            await q.answer("Scout watchlist is empty! Add a creator first.", show_alert=True)
+            return
+        if len(creators) == 1:
+            text, kb = build_target_editor_text(uid, creators[0]["username"], is_admin_mode=True)
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await q.edit_message_text(
+                "🎯 <b>Select Creator to Edit Scout Targets</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap a creator below to customize qualification threshold:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_admin_targets_picker(),
+            )
+
+    elif data.startswith("adm_settgt:"):
+        creator = data.split(":", 1)[1].strip()
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("adm_tl:"):
+        parts = data.split(":")
+        creator = parts[1].strip()
+        new_l = int(parts[2])
+        curr = get_creator_target_thresholds(creator)
+        set_creator_global_targets(creator, min_likes=new_l, max_days=curr.get("max_days", 5.0))
+        await q.answer(f"✅ Scout target: {new_l:,}+ likes!")
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("adm_td:"):
+        parts = data.split(":")
+        creator = parts[1].strip()
+        new_d = float(parts[2])
+        curr = get_creator_target_thresholds(creator)
+        set_creator_global_targets(creator, min_likes=curr.get("min_likes", 5000), max_days=new_d)
+        d_str = f"{int(new_d)}d" if new_d.is_integer() else f"{new_d:.1f}d"
+        await q.answer(f"✅ Scout target: Max {d_str} old!")
+        text, kb = build_target_editor_text(uid, creator, is_admin_mode=True)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data.startswith("adm_tcustom:"):
+        creator = data.split(":", 1)[1].strip()
+        context.user_data["state"] = f"awaiting_adm_target_custom:{creator}"
+        await q.message.reply_html(
+            f"🎯 <b>Set Custom Scout Target for @{html.escape(creator)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Send qualification minimum likes and maximum age:\n\n"
+            "<b>Format:</b> <code>&lt;likes&gt; [days]</code>\n"
+            "<b>Examples:</b>\n"
+            "• <code>50 3</code> (50+ likes, max 3 days)\n"
+            "• <code>200</code> (200+ likes, keep current days)\n"
+            "• <code>1000 2</code> (1,000 likes, max 2 days)\n\n"
             "Send /cancel to abort or tap below.",
             reply_markup=kb_cancel(),
         )
@@ -1587,16 +1861,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── State Machine (User and Admin) ────────────────────────────────────
     state = context.user_data.get("state")
 
+    if state and state.startswith("awaiting_usr_target_custom:"):
+        creator = state.split(":", 1)[1].strip()
+        context.user_data.pop("state", None)
+        curr = get_user_creator_targets(user.id, creator)
+        likes, days = parse_target_likes_days(text, default_likes=curr.get("min_likes", 5000), default_days=curr.get("max_days", 5.0))
+        set_user_watchlist_targets(user.id, creator, min_likes=likes, max_days=days)
+        d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+        l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+        text_resp, kb = build_watchlist_text(user.id)
+        await message.reply_html(
+            f"✅ <b>Target Updated for @{html.escape(creator)}!</b>\n\n"
+            f"❤️ Minimum Likes: <b>{l_str}+</b>\n"
+            f"📅 Maximum Age: <b>Max {d_str}</b>\n\n" + text_resp,
+            reply_markup=kb,
+        )
+        return
+
     if state == "awaiting_user_watch_add":
         context.user_data.pop("state", None)
-        creator = text.strip().lstrip("@").lower()
+        parts = text.strip().split()
+        creator = parts[0].strip().lstrip("@").lower()
+        likes = 5000
+        days = 5.0
+        if len(parts) > 1:
+            likes, days = parse_target_likes_days(" ".join(parts[1:]), default_likes=5000, default_days=5.0)
+
         admin_flag = is_admin(user.id)
         user_limit = get_user_scout_limit(user.id)
-        success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag)
+        success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag, min_likes=likes, max_days=days)
         if success:
             text_resp, kb = build_watchlist_text(user.id)
+            d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+            l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+            target_note = f"\n🎯 Targets set: <b>{l_str}+ likes</b> | <b>Max {d_str}</b>" if len(parts) > 1 else ""
             await message.reply_html(
-                f"{E_CONFETTI} <b>Added @{html.escape(creator)} to your Watchlist!</b>\n\n" + text_resp,
+                f"{E_CONFETTI} <b>Added @{html.escape(creator)} to your Watchlist!</b>{target_note}\n\n" + text_resp,
                 reply_markup=kb,
             )
         elif reason == "limit_reached":
@@ -1609,8 +1909,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_markup=kb_watchlist_delete(user.id),
             )
         elif reason == "already_exists":
-            text_resp, kb = build_watchlist_text(user.id)
-            await message.reply_html(f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>\n\n" + text_resp, reply_markup=kb)
+            if len(parts) > 1:
+                set_user_watchlist_targets(user.id, creator, min_likes=likes, max_days=days)
+                d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+                l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+                text_resp, kb = build_watchlist_text(user.id)
+                await message.reply_html(
+                    f"✅ <b>Updated targets for @{html.escape(creator)}:</b> {l_str}+ likes | Max {d_str}\n\n" + text_resp,
+                    reply_markup=kb,
+                )
+            else:
+                text_resp, kb = build_watchlist_text(user.id)
+                await message.reply_html(f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>\n\n" + text_resp, reply_markup=kb)
         else:
             await message.reply_html(f"⚠️ <b>Could not add @{html.escape(creator)}. Please try again.</b>")
         return
@@ -1677,12 +1987,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_markup=rkb_admin(),
             )
             return
+        if state and state.startswith("awaiting_adm_target_custom:"):
+            creator = state.split(":", 1)[1].strip()
+            context.user_data.pop("state", None)
+            curr = get_creator_target_thresholds(creator)
+            likes, days = parse_target_likes_days(text, default_likes=curr.get("min_likes", 5000), default_days=curr.get("max_days", 5.0))
+            set_creator_global_targets(creator, min_likes=likes, max_days=days)
+            d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+            l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+            text_resp, kb = build_scout_text()
+            await message.reply_html(
+                f"🎯 <b>Scout Qualification Target Updated for @{html.escape(creator)}!</b>\n\n"
+                f"❤️ Minimum Likes: <b>{l_str}+</b>\n"
+                f"📅 Maximum Age: <b>Max {d_str}</b>\n\n" + text_resp,
+                reply_markup=kb,
+            )
+            return
+
         if state == "awaiting_admin_scout_add":
             context.user_data.pop("state", None)
-            creator = text.strip().lstrip("@").lower()
-            add_watchlist_creator(creator, added_by=user.id)
+            parts = text.strip().split()
+            creator = parts[0].strip().lstrip("@").lower()
+            likes = 5000
+            days = 5.0
+            if len(parts) > 1:
+                likes, days = parse_target_likes_days(" ".join(parts[1:]), default_likes=5000, default_days=5.0)
+            add_watchlist_creator(creator, added_by=user.id, min_likes=likes, max_days=days)
             text_resp, kb = build_scout_text()
-            await message.reply_html(f"✅ <b>Added @{html.escape(creator)} to scout watchlist!</b>\n\n" + text_resp, reply_markup=kb)
+            d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+            l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+            target_note = f" (🎯 {l_str}+ likes | 📅 Max {d_str})" if len(parts) > 1 else ""
+            await message.reply_html(f"✅ <b>Added @{html.escape(creator)} to scout watchlist!</b>{target_note}\n\n" + text_resp, reply_markup=kb)
             return
         if state == "awaiting_server_url":
             context.user_data.pop("state", None)
@@ -2697,8 +3032,10 @@ async def dispatch_pending_scout_queue(bot) -> int:
         file_id = item["video_file_id"]
         likes = item.get("likes") or 0
 
-        # Find all subscribers from user_watchlist
-        subscribers = get_subscribers_for_creator(creator)
+        # Find all subscribers from user_watchlist whose targets match this reel
+        subscribers = get_subscribers_for_creator_filtered(creator, likes=likes, age_days=0.0)
+        if not subscribers:
+            subscribers = get_subscribers_for_creator(creator)
 
         # Recipients: all subscribers + all admins (ensures admin always gets discovery)
         recipients = set(subscribers)
@@ -2765,10 +3102,17 @@ async def cmd_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if args:
         subcmd = args[0].lower()
         if subcmd == "add" and len(args) > 1:
-            creator = args[1].strip().lstrip("@")
-            success = add_watchlist_creator(creator, added_by=user.id)
+            creator = args[1].strip().lstrip("@").lower()
+            likes = 5000
+            days = 5.0
+            if len(args) > 2:
+                likes, days = parse_target_likes_days(" ".join(args[2:]), default_likes=5000, default_days=5.0)
+            success = add_watchlist_creator(creator, added_by=user.id, min_likes=likes, max_days=days)
+            d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+            l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+            target_note = f" (🎯 {l_str}+ likes | 📅 Max {d_str})" if len(args) > 2 else ""
             if success:
-                await update.message.reply_html(f"✅ <b>Added @{html.escape(creator)} to viral scout watchlist!</b>")
+                await update.message.reply_html(f"✅ <b>Added @{html.escape(creator)} to viral scout watchlist!</b>{target_note}")
             else:
                 await update.message.reply_html(f"⚠️ <b>Could not add @{html.escape(creator)} (might already be active).</b>")
             return
@@ -2815,14 +3159,21 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         subcmd = args[0].lower()
         if subcmd == "add" and len(args) > 1:
             creator = args[1].strip().lstrip("@").lower()
-            success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag)
+            likes = 5000
+            days = 5.0
+            if len(args) > 2:
+                likes, days = parse_target_likes_days(" ".join(args[2:]), default_likes=5000, default_days=5.0)
+            success, reason = add_user_watchlist_creator(user.id, creator, is_admin_user=admin_flag, min_likes=likes, max_days=days)
+            d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+            l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+            target_note = f"\n🎯 <b>Targets:</b> ❤️ {l_str}+ likes | 📅 Max {d_str}" if len(args) > 2 else ""
             if success:
                 new_count = len(get_user_watchlist(user.id))
                 await update.message.reply_html(
                     f"{E_CONFETTI} <b>Added @{html.escape(creator)} to your Watchlist!</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📊 <b>Slots Used:</b> {new_count} / {limit_str}\n\n"
-                    f"🚀 <i>Whenever @{html.escape(creator)} posts a new viral reel (0–5 days, 5k+ likes), "
+                    f"📊 <b>Slots Used:</b> {new_count} / {limit_str}{target_note}\n\n"
+                    f"🚀 <i>Whenever @{html.escape(creator)} posts a new viral reel meeting your targets, "
                     f"it will be automatically downloaded, protected, and sent to you here!</i>"
                 )
             elif reason == "limit_reached":
@@ -2836,9 +3187,15 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"<i>Tip: You can remove your current creator using <code>/watch remove {my_creators[0] if my_creators else 'username'}</code> to monitor a different one.</i>"
                 )
             elif reason == "already_exists":
-                await update.message.reply_html(
-                    f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>"
-                )
+                if len(args) > 2:
+                    set_user_watchlist_targets(user.id, creator, min_likes=likes, max_days=days)
+                    await update.message.reply_html(
+                        f"✅ <b>Updated targets for @{html.escape(creator)}:</b> ❤️ {l_str}+ likes | 📅 Max {d_str}"
+                    )
+                else:
+                    await update.message.reply_html(
+                        f"⚠️ <b>@{html.escape(creator)} is already on your watchlist!</b>"
+                    )
             else:
                 await update.message.reply_html(
                     f"⚠️ <b>Could not add @{html.escape(creator)}. Please try again.</b>"
@@ -2856,6 +3213,120 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Default /watch display with interactive buttons
     text, kb = build_watchlist_text(user.id)
     await update.message.reply_html(text, reply_markup=kb)
+
+
+async def cmd_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User command to set/edit viral target criteria: /target [@creator] <likes> [days]."""
+    user = update.effective_user
+    if not user:
+        return
+
+    my_creators = get_user_watchlist_details(user.id)
+    args = context.args or []
+
+    if not args:
+        if not my_creators:
+            await update.message.reply_html(
+                "🎯 <b>Set Watchlist Target</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "You are not monitoring any creators yet.\n"
+                "Use <code>/watch add &lt;creator&gt;</code> first or tap <b>🎯 My Watchlist</b>!",
+                reply_markup=rkb_main(),
+            )
+            return
+        if len(my_creators) == 1:
+            text, kb = build_target_editor_text(user.id, my_creators[0]["username"], is_admin_mode=False)
+            await update.message.reply_html(text, reply_markup=kb)
+        else:
+            await update.message.reply_html(
+                "⚙️ <b>Select Creator to Edit Targets</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap a creator below or use: <code>/target &lt;@creator&gt; &lt;likes&gt; [days]</code>",
+                reply_markup=kb_user_targets_picker(user.id),
+            )
+        return
+
+    first_arg = args[0].strip().lstrip("@").lower()
+    creator = None
+    target_args = []
+
+    is_numeric = False
+    cleaned_num = first_arg.replace(",", "").replace("+", "").replace("k", "").replace("m", "").replace(".", "")
+    if cleaned_num.isdigit():
+        is_numeric = True
+
+    if not is_numeric:
+        creator = first_arg
+        target_args = args[1:]
+    else:
+        if len(my_creators) == 1:
+            creator = my_creators[0]["username"]
+            target_args = args
+        elif len(my_creators) > 1:
+            await update.message.reply_html(
+                "⚠️ You monitor multiple creators. Please specify which one:\n"
+                f"Example: <code>/target @{my_creators[0]['username']} {' '.join(args)}</code>",
+            )
+            return
+        else:
+            await update.message.reply_html("⚠️ You don't have any creators on your watchlist yet. Use /watch add <creator> first.")
+            return
+
+    if not target_args:
+        text, kb = build_target_editor_text(user.id, creator, is_admin_mode=False)
+        await update.message.reply_html(text, reply_markup=kb)
+        return
+
+    curr = get_user_creator_targets(user.id, creator)
+    likes, days = parse_target_likes_days(" ".join(target_args), default_likes=curr.get("min_likes", 5000), default_days=curr.get("max_days", 5.0))
+
+    user_watchlist_names = [c["username"] for c in my_creators]
+    if creator not in user_watchlist_names:
+        add_user_watchlist_creator(user.id, creator, is_admin_user=is_admin(user.id), min_likes=likes, max_days=days)
+    else:
+        set_user_watchlist_targets(user.id, creator, min_likes=likes, max_days=days)
+
+    d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+    l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+    await update.message.reply_html(
+        f"✅ <b>Target Updated for @{html.escape(creator)}!</b>\n\n"
+        f"❤️ <b>Minimum Likes:</b> {l_str}+\n"
+        f"📅 <b>Maximum Age:</b> Max {d_str} old\n\n"
+        f"<i>Reels from @{html.escape(creator)} meeting these criteria will be automatically delivered to you!</i>"
+    )
+
+
+async def cmd_settarget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command: Set global qualification target for a creator (/settarget <@creator> <likes> [days])."""
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        return
+
+    args = context.args or []
+    if not args or len(args) < 2:
+        await update.message.reply_html(
+            "<b>Admin Usage:</b> <code>/settarget &lt;@creator&gt; &lt;min_likes&gt; [max_days]</code>\n\n"
+            "<b>Examples:</b>\n"
+            "• <code>/settarget @cool.moco 50 3</code> (target 50+ likes, max 3 days)\n"
+            "• <code>/settarget cool.moco 100</code> (target 100+ likes, max 5 days)\n"
+            "• <code>/settarget @nike 1000 2</code> (target 1k likes, max 2 days)"
+        )
+        return
+
+    creator = args[0].strip().lstrip("@").lower()
+    curr = get_creator_target_thresholds(creator)
+    likes, days = parse_target_likes_days(" ".join(args[1:]), default_likes=curr.get("min_likes", 5000), default_days=curr.get("max_days", 5.0))
+
+    set_creator_global_targets(creator, min_likes=likes, max_days=days)
+    d_str = f"{int(days)}d" if days.is_integer() else f"{days:.1f}d"
+    l_str = f"{likes//1000}k" if likes >= 1000 and likes % 1000 == 0 else f"{likes:,}"
+    await update.message.reply_html(
+        f"🎯 <b>Scout Qualification Target Updated!</b>\n\n"
+        f"👤 <b>Creator:</b> @{html.escape(creator)}\n"
+        f"❤️ <b>Minimum Likes:</b> {l_str}+\n"
+        f"📅 <b>Maximum Age:</b> Max {d_str} old\n\n"
+        f"<i>Workers will now qualify and download reels from @{html.escape(creator)} meeting this threshold!</i>"
+    )
 
 
 # ── Admin Slot Limit Commands ──────────────────────────────────────────────────
@@ -3350,6 +3821,8 @@ def main() -> None:
     app.add_handler(CommandHandler("scout",      cmd_scout))
     app.add_handler(CommandHandler("dispatch",   cmd_dispatch))
     app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
+    app.add_handler(CommandHandler(["target", "settgt"], cmd_target))
+    app.add_handler(CommandHandler(["settarget", "adm_target"], cmd_settarget))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
     app.add_handler(CommandHandler(["getlimit", "limits"], cmd_getlimit))
     app.add_handler(CommandHandler(["cluster", "servers"], cmd_cluster))
