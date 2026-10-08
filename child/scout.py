@@ -126,10 +126,10 @@ def start_health_server(port: int = PORT) -> None:
 def fetch_creator_reel_shortcodes(username: str) -> list[str]:
     """
     Fetch public creator profile HTML using Chrome 124 TLS impersonation.
-    Extracts reel and post shortcodes anonymously without account login or cookies.
+    Queries /reels/ tab (reels feed) and profile root.
+    Extracts shortcodes from both embedded JSON ("code": "...") and HTML links.
     """
     clean_user = username.strip().lstrip("@").lower()
-    url = f"https://www.instagram.com/{clean_user}/"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -148,28 +148,41 @@ def fetch_creator_reel_shortcodes(username: str) -> list[str]:
     if proxy:
         logger.info("Routing scrape @%s through proxy: %s", clean_user, proxy.split("@")[-1] if "@" in proxy else proxy)
 
-    try:
-        r = requests.get(url, impersonate="chrome124", headers=headers, proxies=proxies_dict, timeout=20)
-        if r.status_code != 200:
-            logger.warning("Scrape @%s returned HTTP %s (profile might be private or rate limited)", clean_user, r.status_code)
-            return []
+    target_urls = [
+        f"https://www.instagram.com/{clean_user}/reels/",
+        f"https://www.instagram.com/{clean_user}/",
+    ]
 
-        # Find all reel/post shortcodes (11 alphanumeric characters)
-        found = re.findall(r'/(?:p|reel)/([A-Za-z0-9_-]{11})/', r.text)
+    seen = set()
+    unique_shortcodes = []
 
-        # Deduplicate while preserving profile order (newest first)
-        seen = set()
-        unique_shortcodes = []
-        for sc in found:
-            if sc not in seen:
-                seen.add(sc)
-                unique_shortcodes.append(sc)
+    for target_url in target_urls:
+        try:
+            r = requests.get(target_url, impersonate="chrome124", headers=headers, proxies=proxies_dict, timeout=15)
+            if r.status_code != 200:
+                logger.warning("Scrape %s returned HTTP %s", target_url, r.status_code)
+                continue
+            if "accounts/login" in str(r.url).lower():
+                logger.warning("Scrape %s redirected to login page", target_url)
+                continue
 
-        logger.info("Found %d recent reels on @%s profile", len(unique_shortcodes), clean_user)
-        return unique_shortcodes
-    except Exception as exc:
-        logger.error("Scrape error for @%s: %s", clean_user, exc)
-        return []
+            # Extract from embedded JSON ("code": "XYZ" or "shortcode": "XYZ")
+            json_codes = re.findall(r'["\'](?:code|shortcode)["\']\s*:\s*["\']([A-Za-z0-9_-]{11})["\']', r.text)
+            # Extract from HTML anchor links (/reel/XYZ or /p/XYZ)
+            html_codes = re.findall(r'/(?:reel|p)/([A-Za-z0-9_-]{11})', r.text)
+
+            for sc in (json_codes + html_codes):
+                if sc not in seen:
+                    seen.add(sc)
+                    unique_shortcodes.append(sc)
+
+            if len(unique_shortcodes) >= 6:
+                break
+        except Exception as exc:
+            logger.debug("Scrape error on %s: %s", target_url, exc)
+
+    logger.info("Found %d recent reels on @%s profile", len(unique_shortcodes), clean_user)
+    return unique_shortcodes
 
 
 class SilentLogger:

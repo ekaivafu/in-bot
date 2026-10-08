@@ -744,21 +744,35 @@ async def render_creator_diagnostic(
         text = (
             f"🔍 <b>Live Scout Diagnostic: @{html.escape(clean_user)}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚠️ <b>Profile Status:</b> No reels found or profile is private.\n\n"
-            "💡 <b>Tips:</b>\n"
-            "• Ensure the Instagram profile is <b>public</b>.\n"
-            "• Verify username spelling (do not include spaces or symbols).\n"
-            "• If this account just created reels, Instagram might need a few minutes to index them.\n\n"
+            "⚠️ <b>Profile Status:</b> Could not load reels from profile.\n\n"
+            "💡 <b>Possible reasons:</b>\n"
+            "• Account is <b>private</b> or username is misspelled.\n"
+            "• Account has not posted any public reels yet.\n"
+            "• Instagram temporary rate-limit or login challenge on cloud IP.\n\n"
+            "🔄 <i>Tap <b>Re-Check Now</b> below to retry inspection!</i>\n\n"
             f"🎯 <i>Configured target: ❤️ {l_str}+ likes | 📅 Max {d_str}</i>"
         )
         return text, reply_markup
 
-    # Profile reachable! Evaluate latest reel
+    # Profile reachable! Find newest valid video reel among shortcodes (skipping photos)
     latest_sc = shortcodes[0]
-    try:
-        meta = await asyncio.to_thread(inspect_single_reel_meta, latest_sc)
-    except Exception as exc:
-        meta = {"error": str(exc)}
+    meta = {}
+    for sc in shortcodes[:5]:
+        try:
+            m = await asyncio.to_thread(inspect_single_reel_meta, sc)
+            if not m.get("error"):
+                latest_sc = sc
+                meta = m
+                break
+        except Exception:
+            pass
+
+    if not meta or meta.get("error"):
+        latest_sc = shortcodes[0]
+        try:
+            meta = await asyncio.to_thread(inspect_single_reel_meta, latest_sc)
+        except Exception as exc:
+            meta = {"error": str(exc)}
 
     likes = meta.get("likes", 0)
     age_days = meta.get("age_days", 0.0)
