@@ -18,7 +18,7 @@ import threading
 import logging
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -325,8 +325,13 @@ def init_db() -> None:
                         ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS assigned_worker_id INTEGER DEFAULT NULL;
                         ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS min_likes INTEGER DEFAULT 5000;
                         ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS max_days REAL DEFAULT 5.0;
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS last_scouted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS last_scout_status TEXT DEFAULT '';
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS reels_checked_count INTEGER DEFAULT 0;
+                        ALTER TABLE creator_watchlist ADD COLUMN IF NOT EXISTS max_likes_found INTEGER DEFAULT 0;
                         ALTER TABLE user_watchlist ADD COLUMN IF NOT EXISTS min_likes INTEGER DEFAULT 5000;
                         ALTER TABLE user_watchlist ADD COLUMN IF NOT EXISTS max_days REAL DEFAULT 5.0;
+                        ALTER TABLE child_servers ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT NOW();
                     """)
 
                     # Check if migration needed
@@ -451,8 +456,13 @@ def init_db() -> None:
                 "ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL",
                 "ALTER TABLE creator_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
                 "ALTER TABLE creator_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+                "ALTER TABLE creator_watchlist ADD COLUMN last_scouted_at TEXT DEFAULT NULL",
+                "ALTER TABLE creator_watchlist ADD COLUMN last_scout_status TEXT DEFAULT ''",
+                "ALTER TABLE creator_watchlist ADD COLUMN reels_checked_count INTEGER DEFAULT 0",
+                "ALTER TABLE creator_watchlist ADD COLUMN max_likes_found INTEGER DEFAULT 0",
                 "ALTER TABLE user_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
                 "ALTER TABLE user_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+                "ALTER TABLE child_servers ADD COLUMN last_heartbeat TEXT DEFAULT NULL",
             ]:
                 try:
                     cur.execute(stmt)
@@ -906,14 +916,46 @@ def get_active_watchlist() -> list[str]:
         return []
 
 
+def _format_time_ago(dt: any) -> str:
+    """Helper to convert datetime/timestamp to human readable time ago."""
+    if not dt:
+        return "Never"
+    try:
+        if isinstance(dt, str):
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = (datetime.now(timezone.utc) - dt).total_seconds()
+            if delta < 60:
+                return "Just now"
+            elif delta < 3600:
+                return f"{int(delta // 60)}m ago"
+            elif delta < 86400:
+                return f"{int(delta // 3600)}h ago"
+            else:
+                return f"{int(delta // 86400)}d ago"
+    except Exception:
+        pass
+    return "Never"
+
+
 def get_active_watchlist_with_targets() -> list[dict]:
-    """Return all active creators with target min_likes and max_days."""
+    """Return all active creators with targets and live scout inspection status."""
     try:
         with get_db_cursor() as cur:
             active_clause = "active = TRUE" if USE_POSTGRES else "active = 1"
             cur.execute(
                 f"""
-                SELECT username, COALESCE(min_likes, 5000), COALESCE(max_days, 5.0), COALESCE(assigned_worker_id, 0)
+                SELECT
+                    username,
+                    COALESCE(min_likes, 5000),
+                    COALESCE(max_days, 5.0),
+                    COALESCE(assigned_worker_id, 0),
+                    last_scouted_at,
+                    COALESCE(reels_checked_count, 0),
+                    COALESCE(max_likes_found, 0),
+                    COALESCE(last_scout_status, '')
                 FROM creator_watchlist
                 WHERE {active_clause}
                 ORDER BY id ASC
@@ -926,6 +968,11 @@ def get_active_watchlist_with_targets() -> list[dict]:
                     "min_likes": int(r[1]),
                     "max_days": float(r[2]),
                     "worker_id": r[3],
+                    "last_scouted_at": r[4],
+                    "reels_count": int(r[5] or 0),
+                    "max_likes": int(r[6] or 0),
+                    "status_note": r[7] or "",
+                    "time_ago": _format_time_ago(r[4]),
                 }
                 for r in rows
             ]
@@ -1256,16 +1303,25 @@ def get_user_watchlist_count(user_id: int) -> int:
 
 
 def get_user_watchlist_details(user_id: int) -> list[dict]:
-    """Retrieve all creator accounts tracked by user with their target likes and max days."""
+    """Retrieve all creator accounts tracked by user with their targets and live scout status."""
     try:
         placeholder = "%s" if USE_POSTGRES else "?"
         with get_db_cursor() as cur:
             cur.execute(
                 f"""
-                SELECT username, COALESCE(min_likes, 5000), COALESCE(max_days, 5.0)
-                FROM user_watchlist
-                WHERE user_id = {placeholder}
-                ORDER BY id ASC
+                SELECT
+                    u.username,
+                    COALESCE(u.min_likes, 5000),
+                    COALESCE(u.max_days, 5.0),
+                    c.last_scouted_at,
+                    COALESCE(c.reels_checked_count, 0),
+                    COALESCE(c.max_likes_found, 0),
+                    COALESCE(c.last_scout_status, ''),
+                    COALESCE(c.assigned_worker_id, 0)
+                FROM user_watchlist u
+                LEFT JOIN creator_watchlist c ON LOWER(u.username) = LOWER(c.username)
+                WHERE u.user_id = {placeholder}
+                ORDER BY u.id ASC
                 """,
                 (user_id,),
             )
@@ -1275,11 +1331,144 @@ def get_user_watchlist_details(user_id: int) -> list[dict]:
                     "username": r[0],
                     "min_likes": int(r[1]),
                     "max_days": float(r[2]),
+                    "last_scouted_at": r[3],
+                    "reels_count": int(r[4] or 0),
+                    "max_likes": int(r[5] or 0),
+                    "status_note": r[6] or "",
+                    "worker_id": r[7],
+                    "time_ago": _format_time_ago(r[3]),
                 }
                 for r in rows
             ]
     except Exception as exc:
         logger.warning("get_user_watchlist_details error for %s: %s", user_id, exc)
+        return []
+
+
+def record_creator_scout_activity(
+    creator: str,
+    reels_count: int = 0,
+    max_likes: int = 0,
+    status_note: str = "",
+    worker_id: int | None = None,
+) -> bool:
+    """Record that a creator's profile was actively inspected by scout worker."""
+    clean_user = creator.strip().lstrip("@").lower()
+    if not clean_user:
+        return False
+    try:
+        now_ts = datetime.now(timezone.utc)
+        placeholder = "%s" if USE_POSTGRES else "?"
+        worker_clause = f", assigned_worker_id = {placeholder}" if worker_id is not None else ""
+        params = [now_ts, reels_count, max_likes, status_note]
+        if worker_id is not None:
+            params.append(worker_id)
+        params.append(clean_user)
+
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE creator_watchlist
+                SET last_scouted_at = {placeholder},
+                    reels_checked_count = {placeholder},
+                    max_likes_found = {placeholder},
+                    last_scout_status = {placeholder}
+                    {worker_clause}
+                WHERE username = {placeholder}
+                """,
+                tuple(params),
+            )
+        return True
+    except Exception as exc:
+        logger.warning("record_creator_scout_activity error for %s: %s", clean_user, exc)
+        return False
+
+
+def get_creator_scout_activity(creator: str) -> dict:
+    """Retrieve the latest scout activity and time ago for a creator."""
+    clean_user = creator.strip().lstrip("@").lower()
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT last_scouted_at, reels_checked_count, max_likes_found, last_scout_status, assigned_worker_id
+                FROM creator_watchlist
+                WHERE username = {placeholder}
+                LIMIT 1
+                """,
+                (clean_user,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "last_scouted_at": row[0],
+                    "reels_count": int(row[1] or 0),
+                    "max_likes": int(row[2] or 0),
+                    "status_note": row[3] or "",
+                    "worker_id": row[4],
+                    "time_ago": _format_time_ago(row[0]),
+                }
+        return {"last_scouted_at": None, "reels_count": 0, "max_likes": 0, "status_note": "", "worker_id": None, "time_ago": "Never"}
+    except Exception as exc:
+        logger.warning("get_creator_scout_activity error for %s: %s", clean_user, exc)
+        return {"last_scouted_at": None, "reels_count": 0, "max_likes": 0, "status_note": "", "worker_id": None, "time_ago": "Never"}
+
+
+def record_worker_heartbeat(worker_id: int | None) -> bool:
+    """Record alive heartbeat timestamp for child server."""
+    if worker_id is None:
+        return False
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        now_ts = datetime.now(timezone.utc)
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"UPDATE child_servers SET last_heartbeat = {placeholder} WHERE id = {placeholder}",
+                (now_ts, worker_id),
+            )
+        return True
+    except Exception as exc:
+        logger.warning("record_worker_heartbeat error for #%s: %s", worker_id, exc)
+        return False
+
+
+def get_cluster_worker_activity() -> list[dict]:
+    """Retrieve all workers with their last heartbeat and active workload."""
+    try:
+        with get_db_cursor() as cur:
+            active_clause = "active = TRUE" if USE_POSTGRES else "active = 1"
+            cur.execute(
+                f"""
+                SELECT id, name, url, last_heartbeat,
+                       (SELECT COUNT(*) FROM creator_watchlist c WHERE c.assigned_worker_id = s.id AND {active_clause})
+                FROM child_servers s
+                WHERE {active_clause}
+                ORDER BY id ASC
+                """
+            )
+            rows = cur.fetchall()
+            res = []
+            for r in rows:
+                sid, name, url, hb_dt, c_count = r
+                t_ago = _format_time_ago(hb_dt)
+                is_online = False
+                if hb_dt:
+                    if isinstance(hb_dt, datetime):
+                        delta = (datetime.now(timezone.utc) - (hb_dt.replace(tzinfo=timezone.utc) if hb_dt.tzinfo is None else hb_dt)).total_seconds()
+                        is_online = delta < 300  # < 5 minutes
+                res.append({
+                    "id": sid,
+                    "name": name,
+                    "url": url,
+                    "last_heartbeat": hb_dt,
+                    "time_ago": t_ago,
+                    "is_online": is_online,
+                    "creator_count": int(c_count or 0),
+                })
+            return res
+    except Exception as exc:
+        logger.warning("get_cluster_worker_activity error: %s", exc)
         return []
 
 

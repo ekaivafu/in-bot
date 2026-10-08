@@ -90,6 +90,11 @@ def get_next_proxy() -> str | None:
 # ── Render Health Check HTTP Server ───────────────────────────────────────────
 class ScoutHealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if WORKER_ID is not None:
+            try:
+                database.record_worker_heartbeat(WORKER_ID)
+            except Exception:
+                pass
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
@@ -175,17 +180,17 @@ class SilentLogger:
 
 
 # ── Reel Evaluator ─────────────────────────────────────────────────────────────
-def evaluate_reel(shortcode: str, creator: str) -> dict | None:
+def evaluate_reel(shortcode: str, creator: str) -> tuple[dict | None, int]:
     """
     Query live metadata anonymously without downloading the file.
     Evaluates:
       1. Has this reel already been processed?
-      2. Upload age: Is it between 0 and 5 days old?
-      3. Likes: Does it have at least 5,000 likes?
-    Returns qualified reel dict or None.
+      2. Upload age: Is it within target_max_days?
+      3. Likes: Does it have at least target_min_likes?
+    Returns (qualified_reel_dict or None, likes_count).
     """
     if database.is_reel_seen(shortcode):
-        return None
+        return None, 0
 
     url = f"https://www.instagram.com/reel/{shortcode}/"
     proxy = get_next_proxy()
@@ -204,7 +209,7 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
             info = ydl.extract_info(url, download=False)
 
         if not info:
-            return None
+            return None, 0
 
         timestamp = info.get("timestamp")
         upload_date_str = info.get("upload_date") or ""
@@ -221,7 +226,7 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
 
         if not timestamp:
             logger.debug("Reel %s: No timestamp found, skipping", shortcode)
-            return None
+            return None, likes
 
         upload_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         now_dt = datetime.now(timezone.utc)
@@ -241,7 +246,7 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
         if age_days > target_max_days:
             logger.info("Reel %s is %.1f days old (> %.1f limit for @%s). Marking seen.", shortcode, age_days, target_max_days, creator)
             database.record_seen_reel(shortcode, creator, likes, upload_date_str, status="passed_too_old")
-            return None
+            return None, likes
 
         # Check likes constraint: >= target_min_likes
         if likes < target_min_likes:
@@ -249,7 +254,7 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
             # If reel is already beyond target age, mark permanently passed
             if age_days >= min(3.0, target_max_days):
                 database.record_seen_reel(shortcode, creator, likes, upload_date_str, status="passed_below_likes")
-            return None
+            return None, likes
 
         # Qualified viral candidate!
         return {
@@ -260,11 +265,61 @@ def evaluate_reel(shortcode: str, creator: str) -> dict | None:
             "upload_date": upload_date_str,
             "title": title.strip(),
             "url": url,
-        }
+        }, likes
     except Exception as exc:
         logger.debug("Error evaluating reel %s: %s", shortcode, exc)
         database.record_seen_reel(shortcode, creator, 0, "", status="error_or_not_video")
-        return None
+        return None, 0
+
+
+def inspect_single_reel_meta(shortcode: str) -> dict:
+    """Extract metadata (likes, upload_date, age_days, title, url) without mutating database."""
+    url = f"https://www.instagram.com/reel/{shortcode}/"
+    proxy = get_next_proxy()
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "socket_timeout": 15,
+        "logger": SilentLogger(),
+    }
+    if proxy:
+        ydl_opts["proxy"] = proxy
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            return {"error": "No media info returned"}
+
+        timestamp = info.get("timestamp")
+        upload_date_str = info.get("upload_date") or ""
+        likes = info.get("like_count") or 0
+        title = info.get("title") or info.get("description") or ""
+
+        if not timestamp and len(upload_date_str) == 8:
+            try:
+                dt = datetime.strptime(upload_date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
+                timestamp = int(dt.timestamp())
+            except Exception:
+                pass
+
+        age_days = 0.0
+        if timestamp:
+            upload_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            age_days = (now_dt - upload_dt).total_seconds() / 86400.0
+
+        return {
+            "shortcode": shortcode,
+            "likes": int(likes),
+            "age_days": round(age_days, 2),
+            "upload_date": upload_date_str,
+            "title": title.strip()[:100],
+            "url": url,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ── Downloader & Telegram Dispatcher ───────────────────────────────────────────
@@ -411,6 +466,9 @@ async def run_scout_cycle(enforce_gap: bool = True) -> int:
     for idx, creator in enumerate(creators, 1):
         logger.info("--- Inspecting creator (%d/%d): @%s ---", idx, len(creators), creator)
         shortcodes = fetch_creator_reel_shortcodes(creator)
+        reels_inspected = len(shortcodes)
+        max_likes_seen = 0
+        new_viral_this_creator = 0
 
         for sc in shortcodes:
             # Immediate zero-cost check: skip if reel already processed
@@ -418,15 +476,36 @@ async def run_scout_cycle(enforce_gap: bool = True) -> int:
                 continue
 
             # Check criteria
-            reel_data = evaluate_reel(sc, creator)
+            reel_data, likes = evaluate_reel(sc, creator)
+            if likes > max_likes_seen:
+                max_likes_seen = likes
+
             if reel_data:
                 # Qualified! Download, protect, upload, enqueue
                 success = await process_viral_reel(reel_data, BOT_TOKEN, TARGET_CHAT_ID)
                 if success:
                     viral_found_count += 1
+                    new_viral_this_creator += 1
 
             # Polite jitter between live reel queries to stay undetected
             await asyncio.sleep(random.uniform(1.5, 3.5))
+
+        status_note = f"Active ({reels_inspected} reels checked"
+        if max_likes_seen > 0:
+            status_note += f", top: {max_likes_seen:,} likes"
+        if new_viral_this_creator > 0:
+            status_note += f", {new_viral_this_creator} queued"
+        status_note += ")"
+
+        database.record_creator_scout_activity(
+            creator=creator,
+            reels_count=reels_inspected,
+            max_likes=max_likes_seen,
+            status_note=status_note,
+            worker_id=WORKER_ID,
+        )
+        if WORKER_ID is not None:
+            database.record_worker_heartbeat(WORKER_ID)
 
         # 5-minute minimum pacing gap between different creators
         if enforce_gap and idx < len(creators):

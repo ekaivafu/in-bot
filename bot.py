@@ -45,8 +45,10 @@ from telegram.ext import (
     filters,
 )
 
+import database
 from database import (
     init_db,
+    is_reel_seen,
     upsert_user,
     log_download,
     get_stats,
@@ -91,8 +93,16 @@ from database import (
     get_active_child_servers,
     rebalance_creator_workload,
     get_cluster_status,
+    record_creator_scout_activity,
+    get_creator_scout_activity,
+    record_worker_heartbeat,
+    get_cluster_worker_activity,
 )
 import cloud_manager
+from child.scout import (
+    fetch_creator_reel_shortcodes,
+    inspect_single_reel_meta,
+)
 from downloader import (
     cleanup_session,
     download_instagram,
@@ -528,15 +538,32 @@ def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📊 <b>Active Slots:</b> <b>{len(my_creators)} / {limit_str}</b>\n\n"
     )
     if my_creators:
-        text += "<b>Monitored Creators & Targets:</b>\n"
+        text += "<b>Monitored Creators & Target Criteria:</b>\n"
         for item in my_creators:
             c = item["username"]
             l = item["min_likes"]
             d = item["max_days"]
             d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
             l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
-            text += f"  • <b>@{html.escape(c)}</b> (❤️ <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>)\n"
-        text += "\n🚀 <i>Viral reels matching your targets will be automatically downloaded and delivered here!</i>\n"
+            t_ago = item.get("time_ago", "Never")
+            r_cnt = item.get("reels_count", 0)
+            m_likes = item.get("max_likes", 0)
+
+            if t_ago not in ("Never", "Pending"):
+                badge = "🟢 <b>Active</b>"
+                scout_note = f"⏱️ Checked <b>{t_ago}</b>"
+                if r_cnt > 0:
+                    scout_note += f" ({r_cnt} reels • top {m_likes:,} likes)"
+            else:
+                badge = "⏳ <b>Queued for first cycle</b>"
+                scout_note = "⏱️ <i>Worker cycle in progress...</i>"
+
+            text += (
+                f"• <b>@{html.escape(c)}</b> — {badge}\n"
+                f"   🎯 Criteria: ❤️ <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>\n"
+                f"   📡 Scout: {scout_note}\n\n"
+            )
+        text += "🚀 <i>Viral reels meeting your targets are downloaded and delivered here automatically!</i>\n"
     else:
         text += "<i>You are not monitoring any creators yet.</i>\n\n"
         text += "Tap <b>➕ Add Creator</b> below to start monitoring!\n"
@@ -547,9 +574,10 @@ def build_watchlist_text(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         row1.append(InlineKeyboardButton("⚙️ Edit Targets", callback_data="watch_tgt_menu"))
         buttons.append(row1)
         buttons.append([
+            InlineKeyboardButton("🔍 Live Check", callback_data="watch_check_menu"),
             InlineKeyboardButton("🗑️ Remove Creator", callback_data="watch_del_menu"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh"),
         ])
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh")])
     else:
         buttons.append(row1)
         buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="watch_refresh")])
@@ -649,6 +677,149 @@ def kb_watchlist_delete(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def kb_watchlist_check_picker(user_id: int) -> InlineKeyboardMarkup:
+    """Generate inline buttons for selecting which creator to run a live check on."""
+    my_creators = get_user_watchlist(user_id)
+    buttons = []
+    for c in my_creators:
+        buttons.append([InlineKeyboardButton(f"🔍 Check @{c}", callback_data=f"watch_check:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Watchlist", callback_data="watch_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def kb_admin_scout_check_picker() -> InlineKeyboardMarkup:
+    """Generate inline buttons for admin to select which creator to run a live check on."""
+    creators = get_active_watchlist()
+    buttons = []
+    for c in creators[:20]:
+        buttons.append([InlineKeyboardButton(f"🔍 Check @{c}", callback_data=f"adm_scout_check:{c}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Scout", callback_data="adm_scout_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def render_creator_diagnostic(
+    creator: str,
+    user_id: int | None = None,
+    is_admin_mode: bool = False,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Runs live Instagram diagnostic asynchronously and generates a transparent breakdown
+    showing reels found, newest reel metadata, like count vs targets, and why it did/didn't qualify.
+    """
+    clean_user = creator.strip().lstrip("@").lower()
+
+    if user_id:
+        targets = get_user_creator_targets(user_id, clean_user)
+    else:
+        targets = get_creator_target_thresholds(clean_user)
+
+    min_likes = targets.get("min_likes", 5000)
+    max_days = targets.get("max_days", 5.0)
+    d_str = f"{int(max_days)}d" if float(max_days).is_integer() else f"{max_days:.1f}d"
+    l_str = f"{min_likes//1000}k" if min_likes >= 1000 and min_likes % 1000 == 0 else f"{min_likes:,}"
+
+    back_cb = "adm_scout_refresh" if is_admin_mode else "watch_refresh"
+    check_cb = f"adm_scout_check:{clean_user}" if is_admin_mode else f"watch_check:{clean_user}"
+    tgt_cb = f"adm_settgt:{clean_user}" if is_admin_mode else f"usr_settgt:{clean_user}"
+
+    buttons = [
+        [
+            InlineKeyboardButton("🔄 Re-Check Now", callback_data=check_cb),
+            InlineKeyboardButton("⚙️ Edit Targets", callback_data=tgt_cb),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(buttons)
+
+    # Fetch live Instagram shortcodes in background thread to never block asyncio loop
+    try:
+        shortcodes = await asyncio.to_thread(fetch_creator_reel_shortcodes, clean_user)
+    except Exception as exc:
+        logger.warning("Diagnostic scrape error for @%s: %s", clean_user, exc)
+        shortcodes = []
+
+    if not shortcodes:
+        text = (
+            f"🔍 <b>Live Scout Diagnostic: @{html.escape(clean_user)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⚠️ <b>Profile Status:</b> No reels found or profile is private.\n\n"
+            "💡 <b>Tips:</b>\n"
+            "• Ensure the Instagram profile is <b>public</b>.\n"
+            "• Verify username spelling (do not include spaces or symbols).\n"
+            "• If this account just created reels, Instagram might need a few minutes to index them.\n\n"
+            f"🎯 <i>Configured target: ❤️ {l_str}+ likes | 📅 Max {d_str}</i>"
+        )
+        return text, reply_markup
+
+    # Profile reachable! Evaluate latest reel
+    latest_sc = shortcodes[0]
+    try:
+        meta = await asyncio.to_thread(inspect_single_reel_meta, latest_sc)
+    except Exception as exc:
+        meta = {"error": str(exc)}
+
+    likes = meta.get("likes", 0)
+    age_days = meta.get("age_days", 0.0)
+    upload_date = meta.get("upload_date", "")
+    url = meta.get("url", f"https://www.instagram.com/reel/{latest_sc}/")
+    age_hours = age_days * 24.0
+    age_disp = f"{int(age_hours)}h ago" if age_hours < 24 else f"{age_days:.1f}d ago"
+
+    # Qualification evaluation
+    already_seen = database.is_reel_seen(latest_sc)
+    if likes >= min_likes and age_days <= max_days:
+        eval_status = (
+            f"🔥 <b>QUALIFIES FOR DELIVERY!</b>\n"
+            f"   • Likes: <b>{likes:,}</b> (Met target {min_likes:,}+)\n"
+            f"   • Age: <b>{age_disp}</b> (Within {d_str} limit)\n"
+            f"   • Status: {'Already processed & queued/sent ✅' if already_seen else 'Ready for next scout download cycle 🚀'}"
+        )
+    elif age_days > max_days:
+        eval_status = (
+            f"⏳ <b>PAST TARGET AGE:</b>\n"
+            f"   • Reel is <b>{age_disp}</b> (exceeds your {d_str} limit).\n"
+            f"   • Scout will deliver newly published reels within {d_str}."
+        )
+    else:
+        diff_likes = min_likes - likes
+        eval_status = (
+            f"⏳ <b>BUILDING MOMENTUM (NOT VIRAL YET):</b>\n"
+            f"   • Current: <b>{likes:,} likes</b> (Target: <b>{l_str}+ likes</b>)\n"
+            f"   • Needs: <b>+{diff_likes:,}</b> more likes to qualify.\n"
+            f"   • Status: Bot is actively monitoring. Once it hits {l_str}+ likes, it will be automatically sent to you!"
+        )
+
+    # Record activity in DB so watchlist shows recent check timestamp immediately
+    record_creator_scout_activity(
+        creator=clean_user,
+        reels_count=len(shortcodes),
+        max_likes=likes,
+        status_note=f"Live check: {likes:,} likes",
+    )
+
+    db_act = get_creator_scout_activity(clean_user)
+    last_checked_str = db_act.get("time_ago", "Just now")
+
+    text = (
+        f"🔍 <b>Live Scout Diagnostic: @{html.escape(clean_user)}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🟢 <b>Instagram Connection:</b> Active & Reachable ✅\n"
+        f"📹 <b>Recent Reels Found:</b> <b>{len(shortcodes)} public reels</b>\n"
+        f"⏱️ <b>Last Checked:</b> <b>{last_checked_str}</b>\n\n"
+        f"🎬 <b>Latest Reel:</b> <a href='{url}'><code>{latest_sc}</code></a>\n"
+        f"• <b>Published:</b> {age_disp} ({upload_date})\n"
+        f"• <b>Current Likes:</b> <b>{likes:,} likes</b>\n\n"
+        f"🎯 <b>Target Criteria Comparison:</b>\n"
+        f"• <b>Target:</b> ❤️ <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>\n"
+        f"• <b>Analysis:</b>\n{eval_status}\n\n"
+        "💡 <i>Tip: Want this reel sooner? Tap <b>⚙️ Edit Targets</b> below to lower the required like threshold.</i>"
+    )
+
+    return text, reply_markup
+
+
 def build_cluster_text() -> tuple[str, InlineKeyboardMarkup]:
     """Generate dynamic cluster status text and interactive buttons."""
     status = get_cluster_status()
@@ -720,13 +891,24 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
     creators = [w["username"] for w in watchlist_items]
     pending = get_pending_viral_reels(limit=5)
     servers = get_active_child_servers()
+    workers_act = get_cluster_worker_activity()
+
+    online_workers = sum(1 for w in workers_act if w.get("is_online"))
+    srv_summary = f"{len(servers)} servers ({online_workers} online 🟢)" if servers else "0 servers"
 
     text = (
         "🎯 <b>Viral Reel Scout System</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Active Watchlist:</b> {len(creators)} creators\n"
-        f"🖥️ <b>Connected Servers:</b> {len(servers)} servers\n\n"
+        f"🖥️ <b>Connected Servers:</b> {srv_summary}\n"
     )
+    if workers_act:
+        for w in workers_act:
+            w_status = "🟢 Online" if w.get("is_online") else "🟡 Standby"
+            w_ago = w.get("time_ago", "Never")
+            text += f"   • <b>{html.escape(w.get('name', 'Worker'))}:</b> {w_status} (ping: {w_ago})\n"
+    text += "\n"
+
     if watchlist_items:
         text += "<b>Monitored Creators & Target Thresholds:</b>\n"
         for item in watchlist_items[:10]:
@@ -735,7 +917,21 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
             d = item["max_days"]
             d_str = f"{int(d)}d" if d.is_integer() else f"{d:.1f}d"
             l_str = f"{l//1000}k" if l >= 1000 and l % 1000 == 0 else f"{l:,}"
-            text += f"  • <b>@{html.escape(c)}</b> (🎯 <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>)\n"
+            t_ago = item.get("time_ago", "Never")
+            r_cnt = item.get("reels_count", 0)
+            m_likes = item.get("max_likes", 0)
+
+            if t_ago not in ("Never", "Pending"):
+                scout_note = f"🟢 Scouted: <b>{t_ago}</b>"
+                if r_cnt > 0:
+                    scout_note += f" ({r_cnt} reels • top: {m_likes:,} likes)"
+            else:
+                scout_note = "⏳ Scouted: <i>Queued for check</i>"
+
+            text += (
+                f"• <b>@{html.escape(c)}</b> (🎯 <code>{l_str}+</code> likes | 📅 <code>Max {d_str}</code>)\n"
+                f"   └ {scout_note}\n"
+            )
         if len(watchlist_items) > 10:
             text += f"  <i>(+{len(watchlist_items)-10} more)</i>\n"
     else:
@@ -753,7 +949,10 @@ def build_scout_text() -> tuple[str, InlineKeyboardMarkup]:
     if creators:
         row_add.append(InlineKeyboardButton("⚙️ Edit Targets", callback_data="adm_scout_tgt_menu"))
         buttons.append(row_add)
-        buttons.append([InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu")])
+        buttons.append([
+            InlineKeyboardButton("🔍 Live Check", callback_data="adm_scout_check_menu"),
+            InlineKeyboardButton("🗑️ Remove Creator", callback_data="adm_scout_del_menu"),
+        ])
     else:
         buttons.append(row_add)
 
@@ -1151,6 +1350,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Advanced anti-detection {E_BLACK_MASK} (fresh metadata & unique hash)\n"
         "• 🎵 1-Tap Audio Extractor (MP3 below video)\n"
         "• Caption in <code>monospace</code> for easy copy\n\n"
+        "🎯 <b>Creator Watchlist & Live Checker:</b>\n"
+        "• <code>/watch</code> — Open your creator watchlist\n"
+        "• <code>/target &lt;@creator&gt; &lt;likes&gt; [days]</code> — Set custom likes / days target\n"
+        "• <code>/check &lt;@creator&gt;</code> — Live inspect account (view recent reels, likes & scout status)\n\n"
         f"{E_WARNING} Problems? Contact the admin.",
         parse_mode=ParseMode.HTML,
     )
@@ -1494,7 +1697,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         remove_user_watchlist_creator(uid, creator)
         await q.answer(f"Removed @{creator} from watchlist.")
         text, kb = build_watchlist_text(uid)
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "watch_check_menu":
+        my_creators = get_user_watchlist(uid)
+        if not my_creators:
+            await q.answer("Your watchlist is empty! Add a creator first.", show_alert=True)
+            return
+        if len(my_creators) == 1:
+            target_creator = my_creators[0]
+            await q.answer(f"🔍 Checking @{target_creator}...")
+            text, kb = await render_creator_diagnostic(target_creator, user_id=uid, is_admin_mode=False)
+            await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await q.answer()
+            await safe_edit_message(
+                q,
+                "🔍 <b>Select Creator for Live Check</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap a creator below to run a live inspection on Instagram:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_watchlist_check_picker(uid),
+            )
+
+    elif data.startswith("watch_check:"):
+        creator = data.split(":", 1)[1].strip()
+        await q.answer(f"🔍 Inspecting @{creator}...")
+        text, kb = await render_creator_diagnostic(creator, user_id=uid, is_admin_mode=False)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
     # ── Admin Cluster & Child Server Callbacks ─────────────────────────────
     elif data in ("adm_srv_menu", "adm_srv_refresh"):
@@ -1662,7 +1892,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         remove_watchlist_creator(creator)
         await q.answer(f"Removed @{creator} from scout.")
         text, kb = build_scout_text()
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "adm_scout_check_menu":
+        creators = get_active_watchlist()
+        if not creators:
+            await q.answer("Scout watchlist is empty! Add a creator first.", show_alert=True)
+            return
+        if len(creators) == 1:
+            target_creator = creators[0]
+            await q.answer(f"🔍 Checking @{target_creator}...")
+            text, kb = await render_creator_diagnostic(target_creator, user_id=None, is_admin_mode=True)
+            await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await q.answer()
+            await safe_edit_message(
+                q,
+                "🔍 <b>Select Creator for Live Scout Check</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap a creator below to inspect profile and reels live on Instagram:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_admin_scout_check_picker(),
+            )
+
+    elif data.startswith("adm_scout_check:"):
+        creator = data.split(":", 1)[1].strip()
+        await q.answer(f"🔍 Inspecting @{creator}...")
+        text, kb = await render_creator_diagnostic(creator, user_id=None, is_admin_mode=True)
+        await safe_edit_message(q, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
     elif data == "adm_scout_dispatch":
         count = await dispatch_pending_scout_queue(context.bot)
@@ -3363,6 +3620,58 @@ async def cmd_settarget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    User/Admin command: Live diagnostic for Instagram account checking.
+    Usage: /check [@creator]
+    """
+    user = update.effective_user
+    if not user:
+        return
+
+    args = context.args or []
+    if args:
+        target_creator = args[0].strip().lstrip("@").lower()
+    else:
+        # Check user's watchlist
+        my_creators = get_user_watchlist(user.id)
+        if not my_creators and is_admin(user.id):
+            my_creators = get_active_watchlist()
+
+        if not my_creators:
+            await update.message.reply_html(
+                "🔍 <b>Live Scout Account Checker</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "You are not monitoring any creators yet.\n\n"
+                "To run a live check on any Instagram account right now, run:\n"
+                "<code>/check &lt;@username&gt;</code>\n\n"
+                "Example: <code>/check cool.moco</code>",
+            )
+            return
+
+        if len(my_creators) == 1:
+            target_creator = my_creators[0]
+        else:
+            if is_admin(user.id):
+                await update.message.reply_html(
+                    "🔍 <b>Select Creator to Check</b>\n\nChoose an account to inspect live on Instagram:",
+                    reply_markup=kb_admin_scout_check_picker(),
+                )
+            else:
+                await update.message.reply_html(
+                    "🔍 <b>Select Creator to Check</b>\n\nChoose an account to inspect live on Instagram:",
+                    reply_markup=kb_watchlist_check_picker(user.id),
+                )
+            return
+
+    wait_msg = await update.message.reply_html(
+        f"🔍 <i>Inspecting @{html.escape(target_creator)} live on Instagram...</i>"
+    )
+    admin_mode = is_admin(user.id)
+    text, kb = await render_creator_diagnostic(target_creator, user_id=user.id, is_admin_mode=admin_mode)
+    await wait_msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+
 # ── Admin Slot Limit Commands ──────────────────────────────────────────────────
 async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command: Set creator slot limit for any user (/setlimit <user_id or @username> <limit>)."""
@@ -3863,6 +4172,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["watch", "watchlist"], cmd_watch))
     app.add_handler(CommandHandler(["target", "settgt"], cmd_target))
     app.add_handler(CommandHandler(["settarget", "adm_target"], cmd_settarget))
+    app.add_handler(CommandHandler(["check", "status", "testacc"], cmd_check))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
     app.add_handler(CommandHandler(["getlimit", "limits"], cmd_getlimit))
     app.add_handler(CommandHandler(["cluster", "servers"], cmd_cluster))
