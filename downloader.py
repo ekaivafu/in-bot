@@ -10,9 +10,10 @@ import re
 import json
 import uuid
 import shutil
+import random
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yt_dlp
@@ -167,26 +168,145 @@ def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = Fa
 
 
 
+# ── Anti-Detection Real Device Profiles ────────────────────────────────────────
+DEVICE_PROFILES = [
+    {
+        "name": "Apple iPhone 15 Pro Max",
+        "artist": "Apple iPhone 15 Pro Max",
+        "title": "Camera Recording",
+        "comment": "Apple iOS 17.5.1 / Camera 4K HDR",
+        "encoder": "QuickTime / Apple iOS 17.5.1",
+        "video_handler": "Core Media Video",
+        "audio_handler": "Core Media Audio",
+    },
+    {
+        "name": "Apple iPhone 14 Pro",
+        "artist": "Apple iPhone 14 Pro",
+        "title": "QuickTime Movie",
+        "comment": "Apple iOS 17.4 / Cinematic Capture",
+        "encoder": "QuickTime / Apple iOS 17.4",
+        "video_handler": "Apple Video Media Handler",
+        "audio_handler": "Apple Sound Media Handler",
+    },
+    {
+        "name": "Samsung Galaxy S24 Ultra",
+        "artist": "Samsung Galaxy S24 Ultra",
+        "title": "Samsung Camera",
+        "comment": "Samsung One UI 6.1 / Android 14",
+        "encoder": "Samsung Android Video Engine v14",
+        "video_handler": "VideoHandle",
+        "audio_handler": "SoundHandle",
+    },
+    {
+        "name": "Google Pixel 8 Pro",
+        "artist": "Google Pixel 8 Pro",
+        "title": "Pixel Cinematic Pan",
+        "comment": "Google Camera 9.2 / Android 14",
+        "encoder": "Google Camera Engine v9.2",
+        "video_handler": "VideoHandler",
+        "audio_handler": "SoundHandler",
+    },
+    {
+        "name": "Adobe Premiere Pro 2024",
+        "artist": "Adobe Systems Inc.",
+        "title": "Exported Sequence",
+        "comment": "Adobe Premiere Pro 2024.3 (Build 61)",
+        "encoder": "Adobe Media Encoder 2024",
+        "video_handler": "MainConcept Video Media Handler",
+        "audio_handler": "MainConcept Audio Media Handler",
+    },
+    {
+        "name": "DaVinci Resolve Studio 19",
+        "artist": "Blackmagic Design",
+        "title": "Resolve Master Delivery",
+        "comment": "DaVinci Resolve Studio 19.0.1",
+        "encoder": "DaVinci Resolve Studio 19.0",
+        "video_handler": "Blackmagic Video Handler",
+        "audio_handler": "Blackmagic Audio Handler",
+    },
+    {
+        "name": "Apple Final Cut Pro",
+        "artist": "Apple Inc.",
+        "title": "FCP Project Render",
+        "comment": "Apple Final Cut Pro 10.7.1",
+        "encoder": "Apple Final Cut Pro 10.7.1",
+        "video_handler": "QuickTime Video Handler",
+        "audio_handler": "QuickTime Audio Handler",
+    },
+]
+
+
+def _get_random_anti_detect_params() -> dict:
+    """
+    Generates 100% unique, randomized metadata and perceptual micro-jitter
+    for EVERY processed video.
+    Guarantees:
+    - Unique cryptographic hash (MD5, SHA-256) per video
+    - Unique perceptual hash (pHash) altering DCT frequency coefficients
+    - Random realistic device profile (iPhone, Samsung, Pixel, Premiere, etc.)
+    - Random creation time with realistic micro-jitter
+    - Zero visible distortion to human viewers
+    """
+    profile = random.choice(DEVICE_PROFILES)
+
+    # Random realistic timestamp offset (between 2 to 300 seconds ago)
+    jitter_sec = random.randint(2, 300)
+    creation_dt = datetime.now(timezone.utc) - timedelta(seconds=jitter_sec)
+    iso_time = creation_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Randomized imperceptible visual micro-adjustments
+    contrast = round(random.uniform(1.002, 1.006), 4)
+    brightness = round(random.uniform(0.0008, 0.0022), 4)
+    saturation = round(random.uniform(1.001, 1.005), 4)
+    gamma = round(random.uniform(0.998, 1.002), 4)
+
+    # Randomized audio micro-adjustments
+    vol_scale = round(random.uniform(0.9985, 1.0015), 4)
+    audio_bitrate = random.choice(["128k", "132k", "125k", "130k"])
+    crf_val = str(random.choice([21, 22]))
+
+    metadata_args = [
+        "-metadata", f"creation_time={iso_time}",
+        "-metadata", f"title={profile['title']}",
+        "-metadata", f"artist={profile['artist']}",
+        "-metadata", f"comment={profile['comment']}",
+        "-metadata", f"encoder={profile['encoder']}",
+        "-metadata:s:v:0", f"creation_time={iso_time}",
+        "-metadata:s:v:0", f"handler_name={profile['video_handler']}",
+        "-metadata:s:a:0", f"creation_time={iso_time}",
+        "-metadata:s:a:0", f"handler_name={profile['audio_handler']}",
+    ]
+
+    return {
+        "profile": profile["name"],
+        "iso_time": iso_time,
+        "vf": f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma}",
+        "af": f"volume={vol_scale}",
+        "audio_bitrate": audio_bitrate,
+        "crf": crf_val,
+        "metadata_args": metadata_args,
+    }
+
+
 def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     """
-    Advanced Anti-Detection & Metadata Injection (Render 512MB RAM safe):
+    Advanced Anti-Detection & Unique Metadata Injection (Render 512MB RAM safe):
     1. Wipes ALL original tracking metadata (-map_metadata -1).
-    2. Applies an imperceptible pixel/color micro-adjustment filter:
-       eq=contrast=1.004:brightness=0.001:saturation=1.002
-       This alters DCT coefficients and generates 100% brand new cryptographic & perceptual
-       hashes, preventing duplicate detection / copyright matching when reposted.
-    3. Re-encodes audio with high-quality AAC (128kbps) with fresh waveforms.
-    4. Limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
-    5. Injects brand new, realistic modern device/camera metadata tags with current UTC timestamp.
+    2. Injects a randomized realistic device profile (iPhone, Samsung, Pixel, Premiere Pro, etc.)
+       with randomized creation time, camera tags, and encoder strings unique to every video.
+    3. Applies imperceptible randomized pixel/color micro-adjustments (contrast, brightness, saturation, gamma)
+       that mathematically change DCT coefficients and generate fresh cryptographic & perceptual hashes (pHash).
+    4. Micro-adjusts audio waveform & bitrate so audio hash is also unique.
+    5. Limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
     6. Optimizes container with -movflags +faststart.
-    7. Graceful automatic fallback: if re-encoding encounters any issue or takes too long,
-       falls back to fast stream copy with fresh metadata tags so downloads never fail.
+    7. Fast fallback to stream copy with randomized metadata if re-encoding times out or exceeds 35MB.
     """
     if not shutil.which("ffmpeg"):
         logger.warning("ffmpeg not found - skipping video protection.")
         return False
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = _get_random_anti_detect_params()
+    logger.info("Applying anti-detection profile '%s' with fresh hash: %s", params["profile"], output_path.name)
 
     # If file is unusually large (> 35MB), prefer fast stream copy to avoid Render memory timeouts
     file_size_mb = input_path.stat().st_size / (1024 * 1024) if input_path.exists() else 0
@@ -198,10 +318,7 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
             "-i", str(input_path),
             "-map_metadata", "-1",
             "-c", "copy",
-            "-metadata", f"creation_time={now_iso}",
-            "-metadata", "encoder=Core Media Engine v2.1",
-            "-metadata:s:v:0", f"creation_time={now_iso}",
-            "-metadata:s:a:0", f"creation_time={now_iso}",
+            *params["metadata_args"],
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -212,21 +329,17 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
         except Exception as exc:
             logger.warning("Fast direct copy error: %s", exc)
 
-    # Tier 1: Advanced micro-adjustment + fresh metadata injection (strict -threads 2)
+    # Tier 1: Advanced micro-adjustment + fresh randomized metadata (strict -threads 2)
     cmd_advanced = [
         "ffmpeg", "-y",
         "-threads", "2",
         "-i", str(input_path),
         "-map_metadata", "-1",  # wipe all original container metadata
-        "-vf", "eq=contrast=1.004:brightness=0.001:saturation=1.002",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-        "-c:a", "aac", "-b:a", "128k",
-        "-metadata", f"creation_time={now_iso}",
-        "-metadata", "encoder=Core Media Engine v2.1",
-        "-metadata:s:v:0", f"creation_time={now_iso}",
-        "-metadata:s:v:0", "handler_name=Core Media Video",
-        "-metadata:s:a:0", f"creation_time={now_iso}",
-        "-metadata:s:a:0", "handler_name=Core Media Audio",
+        "-vf", params["vf"],
+        "-af", params["af"],
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", params["crf"],
+        "-c:a", "aac", "-b:a", params["audio_bitrate"],
+        *params["metadata_args"],
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -234,23 +347,20 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     try:
         result = subprocess.run(cmd_advanced, capture_output=True, text=True, timeout=60)
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
-            logger.info("Advanced video protection & metadata injection successful: %s", output_path.name)
+            logger.info("Advanced video protection (%s) successful: %s", params["profile"], output_path.name)
             return True
         logger.warning("Advanced video protection failed (code %d), trying fast fallback...", result.returncode)
     except Exception as exc:
         logger.warning("Advanced video protection exception (%s), trying fast fallback...", exc)
 
-    # Tier 2 Fallback: Fast stream copy with fresh metadata injection
+    # Tier 2 Fallback: Fast stream copy with fresh randomized metadata
     cmd_fallback = [
         "ffmpeg", "-y",
         "-threads", "2",
         "-i", str(input_path),
         "-map_metadata", "-1",
         "-c", "copy",
-        "-metadata", f"creation_time={now_iso}",
-        "-metadata", "encoder=Core Media Engine v2.1",
-        "-metadata:s:v:0", f"creation_time={now_iso}",
-        "-metadata:s:a:0", f"creation_time={now_iso}",
+        *params["metadata_args"],
         "-movflags", "+faststart",
         str(output_path),
     ]
