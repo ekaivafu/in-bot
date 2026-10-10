@@ -106,7 +106,11 @@ from child.scout import (
 from downloader import (
     cleanup_session,
     download_instagram,
+    download_tiktok,
+    download_media,
     is_instagram_url,
+    is_tiktok_url,
+    is_supported_url,
     convert_json_cookies_to_netscape,
     extract_shortcode,
     extract_audio_from_video,
@@ -424,7 +428,7 @@ def rkb_user() -> ReplyKeyboardMarkup:
             [KeyboardButton(BTN_WATCHLIST), KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Paste an Instagram link or tap Watchlist...",
+        input_field_placeholder="Paste Instagram or TikTok link or tap Watchlist...",
     )
 
 
@@ -1311,13 +1315,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text(
             f"{E_FLAME_BUTTERFLY} <b>Hey {name}! Welcome to InstaBot</b> {E_SPARKLES}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
+            "I download <b>Instagram & TikTok Reels, Videos, Posts & Audio</b> for you.\n\n"
             f"{E_SPARKLES} <b>Features:</b>\n"
-            f"• Best available quality {E_LIGHTNING}\n"
+            f"• Best available watermark-free quality {E_LIGHTNING}\n"
             f"• Repost safe {E_BLACK_MASK} <i>(fresh metadata & unique hash)</i>\n"
             f"• 🎵 1-Tap Audio Extractor <i>(MP3 sound)</i>\n"
-            f"• Monospace caption for 1-tap copy {E_DIAMOND}\n\n"
-            f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
+            f"• Full creator captions formatted for 1-tap copy {E_DIAMOND}\n\n"
+            f"{E_ARROW} <b>Paste any Instagram or TikTok link to get started!</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=rkb_user(),
         )
@@ -1328,8 +1332,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 f"{E_FLAME_BUTTERFLY} <b>Hey {name}! Welcome to InstaBot</b> {E_SPARKLES}\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "I download Instagram <b>Reels, Posts & IGTV</b> for you.\n\n"
-                f"{E_ARROW} <b>Paste any Instagram link to get started!</b>",
+                "I download <b>Instagram & TikTok Reels, Videos & Posts</b> for you.\n\n"
+                f"{E_ARROW} <b>Paste any Instagram or TikTok link to get started!</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=rkb_admin() if is_admin(user.id) else rkb_user(),
             )
@@ -1344,19 +1348,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{E_ARC_REACTOR} <b>InstaBot — Help Guide</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{E_ARROW} <b>How to use:</b>\n"
-        "1. Copy any public Instagram link\n"
+        "1. Copy any public Instagram or TikTok link\n"
         "2. Paste it in this chat\n"
         f"3. Get your video or photos in seconds {E_LIGHTNING}\n"
         "4. Tap <b>🎵 Extract Audio</b> below any video to get the MP3!\n\n"
         f"{E_SPARKLES} <b>Supported links:</b>\n"
-        "<code>instagram.com/reel/...</code>\n"
-        "<code>instagram.com/p/...</code>\n"
-        "<code>instagram.com/tv/...</code>\n\n"
+        "• <code>instagram.com/reel/...</code> or <code>/p/...</code>\n"
+        "• <code>tiktok.com/@user/video/...</code>\n"
+        "• <code>vm.tiktok.com/...</code> or <code>vt.tiktok.com/...</code>\n\n"
         f"{E_HEART_BORDER} <b>Requirements:</b>\n"
         f"{channel_line}"
-        "• Public accounts only\n\n"
+        "• Public accounts and posts only\n\n"
         f"{E_CONFETTI} <b>Features & Safety:</b>\n"
-        "• Highest quality video / images\n"
+        "• Highest quality watermark-free video & images\n"
         f"• Advanced anti-detection {E_BLACK_MASK} (fresh metadata & unique hash)\n"
         "• 🎵 1-Tap Audio Extractor (MP3 below video)\n"
         "• Caption in <code>monospace</code> for easy copy\n\n"
@@ -2489,12 +2493,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
     # ── URL check ─────────────────────────────────────────────────────────
-    if not is_instagram_url(text):
+    if not is_supported_url(text):
         await message.reply_text(
-            f"{E_DARK_CAT} That doesn't look like an Instagram link.\n\n"
+            f"{E_DARK_CAT} That doesn't look like an Instagram or TikTok link.\n\n"
             "Send something like:\n"
-            "<code>https://www.instagram.com/reel/ABC123/</code>\n"
-            "<code>https://www.instagram.com/p/ABC123/</code>",
+            "• <code>https://www.instagram.com/reel/ABC123/</code>\n"
+            "• <code>https://www.tiktok.com/@user/video/1234567890</code>\n"
+            "• <code>https://vm.tiktok.com/ZMxxxxxx/</code>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -2550,6 +2555,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     waiting_decremented = False
     heart_msg = None
     status_msg = None
+    platform_name = "TikTok" if is_tiktok_url(text) else "Instagram"
 
     sem = get_download_semaphore()
     is_queued = sem.locked() or (_active_count >= MAX_CONCURRENT)
@@ -2572,7 +2578,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         else:
             status_msg = await message.reply_text(
-                f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n"
+                f"{E_LIGHTNING} <b>Connecting to {platform_name}...</b>\n"
                 "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
                 "<i>Initializing secure stream...</i>",
                 parse_mode=ParseMode.HTML,
@@ -2590,7 +2596,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await status_msg.edit_text(
                         f"{E_LIGHTNING} <b>Download Started!</b>\n"
                         "<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n"
-                        "<i>Connecting to Instagram...</i>",
+                        f"<i>Connecting to {platform_name}...</i>",
                         parse_mode=ParseMode.HTML,
                     )
                 except Exception:
@@ -2604,7 +2610,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
                 # Run download in worker thread to keep bot completely non-blocking
-                result = await asyncio.to_thread(download_instagram, text)
+                result = await asyncio.to_thread(download_media, text)
             finally:
                 stop_event.set()
                 await anim_task
@@ -2631,21 +2637,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if err_type == "private":
                     await status_msg.edit_text(
                         f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
-                        "This post is from a private account.\n"
+                        f"This post is from a private account on {platform_name}.\n"
                         "I can only download from public accounts.",
                         parse_mode=ParseMode.HTML,
                     )
                 elif err_type == "not_found":
                     await status_msg.edit_text(
                         f"{E_SKULL} <b>Post Not Found</b>\n\n"
-                        "This Instagram reel or post was removed, deleted, or the link is broken.",
+                        f"This {platform_name} video or post was removed, deleted, or the link is broken.",
                         parse_mode=ParseMode.HTML,
                     )
                 else:
                     await status_msg.edit_text(
                         f"{E_BROKEN_HEART} <b>Download Failed</b>\n\n"
-                        "Could not retrieve this reel right now.\n"
-                        "Please verify that the link is a valid public reel and try again.",
+                        f"Could not retrieve this {platform_name} post right now.\n"
+                        "Please verify that the link is a valid public reel or video and try again.",
                         parse_mode=ParseMode.HTML,
                     )
 
@@ -2665,6 +2671,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             video_path   = result.get("video_path")
             image_paths  = result.get("image_paths", [])
             caption_text = result.get("caption", "")
+            author_text  = result.get("author", "")
+            music_text   = result.get("music", "")
+            sc           = result.get("shortcode") or extract_shortcode(text) or ""
 
             try:
                 # ── Case A: Video / Reel ──────────────────────────────────
@@ -2674,16 +2683,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
                         "━━━━━━━━━━━━━━━━━━━━",
                     ]
+                    if author_text:
+                        cap_lines.append(f"👤 <b>Creator:</b> <code>{html.escape(author_text)}</code>")
+                    if music_text:
+                        cap_lines.append(f"🎵 <b>Sound:</b> <code>{html.escape(music_text)}</code>")
                     if caption_text and caption_text.strip():
                         clean_cap = caption_text.strip()
                         if len(clean_cap) > 700:
                             clean_cap = clean_cap[:700] + "…"
                         cap_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
-                        cap_lines.append("━━━━━━━━━━━━━━━━━━━━")
+                    cap_lines.append("━━━━━━━━━━━━━━━━━━━━")
                     cap_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
                     video_caption = "\n".join(cap_lines)
 
-                    sc = extract_shortcode(text) or ""
                     v_kb = kb_video_actions(sc) if sc else None
 
                     await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_VIDEO)
@@ -2695,26 +2707,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         reply_markup=v_kb,
                     )
                     vid_file_id = get_media_file_id(sent_vid)
-                    if sc and vid_file_id:
-                        set_cached_media(
-                            shortcode=sc,
-                            video_file_id=vid_file_id,
-                            caption=caption_text,
-                        )
+                    if vid_file_id:
+                        if sc:
+                            set_cached_media(
+                                shortcode=sc,
+                                video_file_id=vid_file_id,
+                                caption=caption_text,
+                            )
+                        orig_sc = extract_shortcode(text)
+                        if orig_sc and orig_sc != sc:
+                            set_cached_media(
+                                shortcode=orig_sc,
+                                video_file_id=vid_file_id,
+                                caption=caption_text,
+                            )
 
-                # ── Case B: Single Photo or Carousel ──────────────────────
+                # ── Case B: Single Photo or Carousel / Slideshow ──────────
                 elif image_paths:
                     bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
                     media_lines = [
                         f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
                         "━━━━━━━━━━━━━━━━━━━━",
                     ]
+                    if author_text:
+                        media_lines.append(f"👤 <b>Creator:</b> <code>{html.escape(author_text)}</code>")
+                    if music_text:
+                        media_lines.append(f"🎵 <b>Sound:</b> <code>{html.escape(music_text)}</code>")
                     if caption_text and caption_text.strip():
                         clean_cap = caption_text.strip()
                         if len(clean_cap) > 700:
                             clean_cap = clean_cap[:700] + "…"
                         media_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
-                        media_lines.append("━━━━━━━━━━━━━━━━━━━━")
+                    media_lines.append("━━━━━━━━━━━━━━━━━━━━")
                     media_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
                     media_caption = "\n".join(media_lines)
 
@@ -2836,22 +2860,22 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
         await message.reply_text(
             f"{E_SPARKLES} <b>Help — InstaBot</b>\n\n"
             f"<b>How to use:</b>\n"
-            f"1. Copy any public Instagram link\n"
+            f"1. Copy any public Instagram or TikTok link\n"
             f"2. Paste it in this chat\n"
             f"3. Get your video or photos in seconds {E_LIGHTNING}\n"
             f"4. Tap <b>🎵 Extract Audio</b> below any video for MP3 sound!\n\n"
             f"<b>Supported links:</b>\n"
-            f"<code>instagram.com/reel/...</code>\n"
-            f"<code>instagram.com/p/...</code>\n"
-            f"<code>instagram.com/tv/...</code>\n\n"
+            f"• <code>instagram.com/reel/...</code> or <code>/p/...</code>\n"
+            f"• <code>tiktok.com/@user/video/...</code>\n"
+            f"• <code>vm.tiktok.com/...</code> or <code>vt.tiktok.com/...</code>\n\n"
             f"<b>Requirements:</b>\n"
             f"{channel_line}"
-            f"• Public accounts only\n\n"
+            f"• Public accounts and posts only\n\n"
             f"<b>Features & Safety:</b>\n"
-            f"• Highest quality video & photos\n"
+            f"• Highest quality watermark-free video & photos\n"
             f"• Advanced anti-detection {E_BLACK_MASK} (fresh metadata & unique hash)\n"
             f"• 🎵 1-Tap Audio Extractor (MP3 sound)\n"
-            f"• Caption in <code>monospace</code> for easy copy",
+            f"• Creator caption formatted for 1-tap copy",
             parse_mode=ParseMode.HTML,
         )
         return

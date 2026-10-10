@@ -120,16 +120,29 @@ def find_cookies_file() -> str | None:
     return None
 
 
-# ── Regex to loosely validate Instagram URLs ──────────────────────────────────
+# ── Regex to validate Instagram & TikTok URLs ───────────────────────────────
 INSTAGRAM_URL_RE = re.compile(
     r"(https?://)?(www\.)?instagram\.com"
     r"/(p|reel|tv|stories)/[\w\-]+",
     re.IGNORECASE,
 )
 
+TIKTOK_URL_RE = re.compile(
+    r"(https?://)?([a-zA-Z0-9-]+\.)?tiktok\.com/(@[\w.-]+/video/\d+|v/\d+|t/[\w-]+|[\w.-]+)",
+    re.IGNORECASE,
+)
+
 
 def is_instagram_url(url: str) -> bool:
-    return bool(INSTAGRAM_URL_RE.search(url))
+    return bool(INSTAGRAM_URL_RE.search(url)) if url else False
+
+
+def is_tiktok_url(url: str) -> bool:
+    return bool(TIKTOK_URL_RE.search(url)) if url else False
+
+
+def is_supported_url(url: str) -> bool:
+    return is_instagram_url(url) or is_tiktok_url(url)
 
 
 def _build_ydl_opts(output_dir: Path, filename_stem: str, use_cookies: bool = False) -> dict:
@@ -375,9 +388,13 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     try:
         result = subprocess.run(cmd_advanced, capture_output=True, text=True, timeout=60)
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
-            logger.info("Advanced video protection (%s) successful: %s", params["profile"], output_path.name)
-            return True
-        logger.warning("Advanced video protection failed (code %d), trying fast fallback...", result.returncode)
+            out_mb = output_path.stat().st_size / (1024 * 1024)
+            if out_mb <= 48:
+                logger.info("Advanced video protection (%s) successful: %s (%.1f MB)", params["profile"], output_path.name, out_mb)
+                return True
+            logger.warning("Protected video is too large for Telegram (%.1f MB), falling back to fast copy", out_mb)
+        else:
+            logger.warning("Advanced video protection failed (code %d), trying fast fallback...", result.returncode)
     except Exception as exc:
         logger.warning("Advanced video protection exception (%s), trying fast fallback...", exc)
 
@@ -620,11 +637,229 @@ def cleanup_session(video_path: Path | str | None) -> None:
 
 
 def extract_shortcode(url: str) -> str | None:
-    """Extract Instagram shortcode from URL (reel/post/tv)."""
+    """
+    Extract shortcode or video identifier from Instagram or TikTok URL.
+    - Instagram: returns reel/post shortcode, e.g. 'C123456789'
+    - TikTok: returns 'tt_' prefixed ID, e.g. 'tt_7106594312292453675' or 'tt_ZMxxxxxx'
+    """
     if not url:
         return None
-    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url)
-    return match.group(1) if match else None
+
+    # 1. Instagram shortcode
+    ig_match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url)
+    if ig_match:
+        return ig_match.group(1)
+
+    # 2. TikTok standard video URL (@user/video/<id> or /v/<id>)
+    tt_id_match = re.search(r"tiktok\.com/(?:@[^/?#\s]+/video/|v/)(\d+)", url)
+    if tt_id_match:
+        return f"tt_{tt_id_match.group(1)}"
+
+    # 3. TikTok short / share link (vm.tiktok.com/<code/>, vt.tiktok.com/<code/>, tiktok.com/t/<code/>)
+    tt_short_match = re.search(r"(?:vm|vt)\.tiktok\.com/([A-Za-z0-9_-]+)|tiktok\.com/t/([A-Za-z0-9_-]+)", url)
+    if tt_short_match:
+        code = tt_short_match.group(1) or tt_short_match.group(2)
+        return f"tt_{code}"
+
+    # 4. Fallback TikTok URL match
+    tt_any = re.search(r"tiktok\.com/([A-Za-z0-9_.-]+)", url)
+    if tt_any:
+        return f"tt_{tt_any.group(1)}"
+
+    return None
+
+
+def download_tiktok(url: str) -> dict:
+    """
+    Download TikTok video, reel, or photo slideshow with 100% cookie-free architecture:
+    1. Primary Tier: TikWM public API (watermark-free HD MP4, full captions, zero rate limits).
+    2. Fallback Tier: Anonymous yt-dlp public extractor.
+    3. Anti-Detection: Unique device profile injection & perceptual hash protection.
+    4. Photo Slides: Automatically extracts and packages multi-image slideshows.
+    5. Delivers complete creator details, caption, sound/music info, and audio extraction support.
+    """
+    session_id = uuid.uuid4().hex[:8]
+    work_dir = DOWNLOAD_DIR / f"tt_{session_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "success":    False,
+        "video_path": None,
+        "image_paths": [],
+        "is_video":   True,
+        "caption":    "",
+        "author":     "",
+        "music":      "",
+        "shortcode":  None,
+        "error":      None,
+        "error_type": None,
+        "raw_error":  None,
+    }
+
+    # Extract clean URL from input
+    clean_url = url.strip()
+    url_m = re.search(r"https?://[^\s]+", url)
+    if url_m:
+        clean_url = url_m.group(0).strip()
+    elif not clean_url.startswith("http"):
+        clean_url = f"https://{clean_url}"
+
+    logger.info("Starting TikTok download: %s", clean_url)
+
+    # ── Tier 1: TikWM Direct Public API (Watermark-free HD stream) ───────────────
+    tikwm_endpoints = [
+        "https://www.tikwm.com/api/",
+        "https://tikwm.com/api/",
+    ]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    for ep in tikwm_endpoints:
+        try:
+            resp = cffi_requests.post(
+                ep,
+                data={"url": clean_url, "count": 12, "cursor": 0, "web": 1, "hd": 1},
+                headers=headers,
+                impersonate="chrome124",
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                continue
+
+            data = resp.json()
+            code = data.get("code")
+            if code != 0 or not data.get("data"):
+                msg = (data.get("msg") or "").lower()
+                if "private" in msg:
+                    result["error_type"] = "private"
+                    result["error"] = "This TikTok video or account is private."
+                elif any(w in msg for w in ("not found", "deleted", "remove", "failed")):
+                    result["error_type"] = "not_found"
+                    result["error"] = "This TikTok video was deleted or is no longer available."
+                continue
+
+            d = data["data"]
+            video_id = str(d.get("id") or "")
+            caption = (d.get("title") or "").strip()
+            author_info = d.get("author") or {}
+            author_name = author_info.get("nickname") or author_info.get("unique_id") or ""
+            music_info = d.get("music_info") or {}
+            music_title = music_info.get("title") or ""
+
+            result["caption"] = caption
+            result["author"] = author_name
+            result["music"] = music_title
+            result["shortcode"] = f"tt_{video_id}" if video_id else (extract_shortcode(clean_url) or f"tt_{session_id}")
+
+            # Check for photo slides / gallery
+            images = d.get("images")
+            if images and isinstance(images, list) and len(images) > 0:
+                downloaded_images = []
+                for idx, img_url in enumerate(images[:10]):
+                    try:
+                        img_resp = cffi_requests.get(img_url, headers=headers, impersonate="chrome124", timeout=20)
+                        if img_resp.status_code == 200 and len(img_resp.content) > 1000:
+                            img_file = work_dir / f"slide_{idx + 1}.jpg"
+                            img_file.write_bytes(img_resp.content)
+                            downloaded_images.append(img_file)
+                    except Exception as e:
+                        logger.warning("Failed to download TikTok slide %d: %s", idx, e)
+
+                if downloaded_images:
+                    result["image_paths"] = downloaded_images
+                    result["is_video"] = False
+                    result["success"] = True
+                    logger.info("TikTok photo slides downloaded successfully: %d images", len(downloaded_images))
+                    return result
+
+            # Download video stream (prefer hdplay)
+            play_url = d.get("hdplay") or d.get("play")
+            if play_url:
+                if play_url.startswith("/"):
+                    play_url = "https://www.tikwm.com" + play_url
+
+                raw_video = work_dir / "raw_media.mp4"
+                v_resp = cffi_requests.get(play_url, headers=headers, impersonate="chrome124", timeout=45)
+                if v_resp.status_code == 200 and len(v_resp.content) > 5000:
+                    raw_video.write_bytes(v_resp.content)
+
+                    clean_video = work_dir / "clean_media.mp4"
+                    stripped = _strip_and_protect_video(raw_video, clean_video)
+                    final_video = clean_video if (stripped and clean_video.exists() and clean_video.stat().st_size > 1000) else raw_video
+
+                    result["video_path"] = final_video
+                    result["is_video"] = True
+                    result["success"] = True
+                    logger.info(
+                        "TikWM video download succeeded: %s (%.1f MB)",
+                        result["shortcode"],
+                        final_video.stat().st_size / (1024 * 1024),
+                    )
+                    return result
+
+        except Exception as exc:
+            logger.debug("TikWM attempt on %s failed: %s", ep, exc)
+
+    # ── Tier 2: Anonymous yt-dlp Public Extractor Fallback ────────────────────────
+    try:
+        ydl_opts_anon = _build_ydl_opts(work_dir, "media", use_cookies=False)
+        with yt_dlp.YoutubeDL(ydl_opts_anon) as ydl_anon:
+            info = ydl_anon.extract_info(clean_url, download=True)
+
+        if _extract_media_result(work_dir, info, result):
+            result["shortcode"] = result.get("shortcode") or extract_shortcode(clean_url) or f"tt_{session_id}"
+            uploader = info.get("uploader") or info.get("channel") or ""
+            if uploader and not result.get("author"):
+                result["author"] = uploader
+            logger.info("TikTok download succeeded via anonymous yt-dlp fallback!")
+            return result
+
+    except yt_dlp.utils.DownloadError as exc_1:
+        err_msg = str(exc_1)
+        err_lower = err_msg.lower()
+        result["raw_error"] = err_msg
+
+        if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
+            result["error_type"] = "not_found"
+            result["error"] = "This TikTok video was deleted or is no longer available."
+        elif "private" in err_lower:
+            result["error_type"] = "private"
+            result["error"] = "This TikTok account or video is private."
+        else:
+            result["error_type"] = "generic"
+            result["error"] = "Could not download this TikTok video. Please ensure the link is public and valid."
+
+        logger.warning("TikTok yt-dlp fallback error: %s", err_msg)
+
+    except Exception as exc:
+        result["error_type"] = "generic"
+        result["error"] = "Could not download this TikTok video."
+        result["raw_error"] = str(exc)
+        logger.exception("Unexpected TikTok download error")
+
+    if not result.get("error"):
+        result["error_type"] = "generic"
+        result["error"] = "Could not download this TikTok video. Please ensure the link is public and valid."
+
+    return result
+
+
+def download_media(url: str) -> dict:
+    """
+    Unified media downloader:
+    - Auto-detects whether the URL is TikTok or Instagram.
+    - Routes to the appropriate high-speed cookie-free engine.
+    - Always applies anti-detection metadata and perceptual protection.
+    """
+    if is_tiktok_url(url):
+        return download_tiktok(url)
+    return download_instagram(url)
 
 
 def extract_audio_from_video(video_path: Path, output_audio_path: Path | None = None) -> Path | None:
