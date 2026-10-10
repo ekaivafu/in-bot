@@ -367,62 +367,30 @@ async def get_unjoined_channels(bot, user_id: int) -> list[dict]:
 
 
 # ── Job: Cookie Reminder ───────────────────────────────────────────────────────
+# ── Cookie-Free Architecture (No Reminders or Auto-Maintenance) ───────────────
 async def cookie_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs every 10 minutes while cookie_alert_active == '1'."""
-    if get_setting("cookie_alert_active", "0") != "1":
+    """No-op: Cookie reminders are disabled in 100% cookie-free mode."""
+    if context.job:
         context.job.schedule_removal()
-        return
-    await alert_admin(
-        context.bot,
-        f"{E_WARNING} <b>Cookie Reminder</b>\n\n"
-        "Instagram cookies are still expired or invalid.\n\n"
-        f"{E_ARROW} <b>Fastest fix:</b>\n"
-        "Send your fresh <code>cookies.txt</code> or <code>.json</code> directly to this chat!\n"
-        "The bot will automatically update and resume downloads.\n\n"
-        f"{E_CLOCK_TIME} <code>{now_str()}</code>",
-    )
 
 
 async def cookie_health_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Proactively checks Instagram cookie validity every 30 minutes."""
-    if get_setting("cookie_alert_active", "0") == "1":
-        return
-
-    is_healthy, reason = check_cookies_health()
-    if not is_healthy:
-        logger.warning("Cookie health check failed: %s", reason)
-        set_setting("maintenance_mode", "1")
-        set_setting("cookie_alert_active", "1")
-        start_cookie_reminder(context.job_queue)
-        await alert_admin(
-            context.bot,
-            f"{E_WARNING} <b>Cookie Health Alert — Issue Detected!</b>\n\n"
-            f"The 30-minute health monitor detected a cookie issue:\n"
-            f"<b>Reason:</b> <code>{html.escape(reason)}</code>\n\n"
-            f"{E_ARC_REACTOR} <b>Maintenance mode auto-enabled.</b>\n"
-            f"{E_CLOCK_TIME} Admin reminders will be sent every 10 minutes.\n\n"
-            f"{E_ARROW} <b>Fastest fix:</b>\n"
-            f"Send your fresh <code>cookies.txt</code> or <code>.json</code> directly to this chat!",
-        )
-    else:
-        logger.info("30-min cookie health check passed: %s", reason)
+    """No-op: Health check is permanently disabled in cookie-free mode."""
+    pass
 
 
 def start_cookie_reminder(job_queue) -> None:
-    if not job_queue.get_jobs_by_name("cookie_reminder"):
-        job_queue.run_repeating(
-            cookie_reminder_job,
-            interval=600,
-            first=30,
-            name="cookie_reminder",
-        )
-        logger.info("Cookie reminder started (every 10 min)")
+    """No-op: Cookie reminders are permanently disabled."""
+    pass
 
 
 def stop_cookie_reminder(job_queue) -> None:
-    for job in job_queue.get_jobs_by_name("cookie_reminder"):
-        job.schedule_removal()
+    """Cleanly remove any legacy cookie reminder jobs."""
+    if job_queue:
+        for job in job_queue.get_jobs_by_name("cookie_reminder"):
+            job.schedule_removal()
     set_setting("cookie_alert_active", "0")
+
     logger.info("Cookie reminder stopped")
 
 
@@ -468,7 +436,7 @@ def kb_cancel() -> InlineKeyboardMarkup:
 def rkb_admin() -> ReplyKeyboardMarkup:
     """Persistent bottom keyboard for the admin."""
     maint_label = "🔧 Maintenance: ON" if is_maintenance() else "🔧 Maintenance: OFF"
-    cookie_label = "🍪 Cookie: 🔴 Alert" if get_setting("cookie_alert_active", "0") == "1" else "🍪 Cookie: ✅ OK"
+    engine_label = "⚡ Engine: Cookie-Free 🚀"
     chan_count = get_channel_count()
     chan_label = f"📺 Channels ({chan_count})"
     return ReplyKeyboardMarkup(
@@ -476,11 +444,12 @@ def rkb_admin() -> ReplyKeyboardMarkup:
             [KeyboardButton(BTN_STATS),       KeyboardButton(BTN_BROADCAST)],
             [KeyboardButton(BTN_SERVERS),     KeyboardButton(BTN_SCOUT)],
             [KeyboardButton(maint_label),     KeyboardButton(chan_label)],
-            [KeyboardButton(cookie_label),    KeyboardButton(BTN_CLOSE_MENU)],
+            [KeyboardButton(engine_label),    KeyboardButton(BTN_CLOSE_MENU)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin mode active...",
     )
+
 
 
 # ── Watchlist, Cluster, and Scout Inline UI Builders ──────────────────────────
@@ -1130,12 +1099,10 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
             InlineKeyboardButton(chan_label, callback_data="adm_chan_menu"),
         ],
         [
-            InlineKeyboardButton(
-                "🍪 Clear Cookie Alert 🔴" if cookie_flag else "🍪 Cookie: OK ✅",
-                callback_data="adm_cookie_clear",
-            ),
+            InlineKeyboardButton("⚡ Engine: 100% Cookie-Free 🚀", callback_data="adm_engine_info"),
         ],
     ])
+
 
 
 def build_channel_list_text() -> str:
@@ -1247,7 +1214,7 @@ def kb_back_admin() -> InlineKeyboardMarkup:
 def build_stats_text() -> str:
     s          = get_stats()
     maint      = f"{E_CHECK_MARK} <b>ON</b>" if is_maintenance() else f"{E_CROSS_MARK} <b>OFF</b>"
-    cookie     = f"{E_WARNING} Alert active" if get_setting("cookie_alert_active", "0") == "1" else f"{E_CHECK_MARK} OK"
+    engine     = f"{E_CHECK_MARK} <b>Cookie-Free (Meta CDN) 🚀</b>"
     channels   = get_all_channels()
     ch_count   = len(channels)
     ch_summary = f"{ch_count} Active" if ch_count > 0 else "None"
@@ -1265,10 +1232,11 @@ def build_stats_text() -> str:
         f"  • Active downloads : <code>{q_active}/{MAX_CONCURRENT}</code>\n"
         f"  • Queue waiting    : <code>{_waiting_count}</code>\n"
         f"  • Maintenance      : {maint}\n"
-        f"  • Cookie status    : {cookie}\n"
+        f"  • Download Engine  : {engine}\n"
         f"  • Required Channels: <b>{ch_summary}</b>\n\n"
         f"{E_CLOCK_TIME} <code>{now_str()}</code>"
     )
+
 
 
 # ── Command Handlers ───────────────────────────────────────────────────────────
@@ -1633,14 +1601,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ]),
         )
 
-    elif data == "adm_cookie_clear":
+    elif data in ("adm_engine_info", "adm_cookie_clear"):
+        set_setting("cookie_alert_active", "0")
         stop_cookie_reminder(context.job_queue)
         await q.edit_message_text(
-            f"{E_SPARKLES} <b>Cookie alert cleared.</b>\n\n"
-            "Make sure you've updated <code>cookies.txt</code> on Render, then turn off Maintenance.",
+            f"🚀 <b>Download Engine: 100% Cookie-Free Active!</b>\n\n"
+            f"• <b>Primary:</b> High-speed direct Meta CDN Embed Extractor\n"
+            f"• <b>Fallback:</b> Anonymous yt-dlp Extractor\n"
+            f"• <b>Status:</b> 🟢 Active & Ready\n"
+            f"• <b>Accounts/Cookies:</b> None required! Maintenance auto-lock permanently disabled.\n\n"
+            f"Enjoy 24/7 uninterrupted downloads!",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_back_admin(),
         )
+
 
     # ── User Watchlist Interactive Callbacks ──────────────────────────────
     elif data == "watch_refresh":
@@ -2483,9 +2457,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
 
     # ── Reply Keyboard Button Presses ─────────────────────────────────────
-    if text in ALL_BTNS or text.startswith("🔧 Maintenance:") or text.startswith("🍪 Cookie:") or text.startswith("📺 Channels"):
+    if text in ALL_BTNS or text.startswith("🔧 Maintenance:") or text.startswith("🍪 Cookie:") or text.startswith("⚡ Engine:") or text.startswith("📺 Channels"):
         await _handle_button(text, user, message, context)
         return
+
 
     # ── Maintenance gate ───────────────────────────────────────────────────
     if is_maintenance() and not is_admin(user.id):
@@ -2644,57 +2619,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 log_download(user.id, text, False)
                 err_type = result.get("error_type", "generic")
 
-                if err_type == "cookie":
-                    set_setting("maintenance_mode", "1")
-                    set_setting("cookie_alert_active", "1")
-                    start_cookie_reminder(context.job_queue)
-
-                    await alert_admin(
-                        context.bot,
-                        f"{E_WARNING} <b>Cookie Error — Maintenance ON</b>\n\n"
-                        f"👤 User: {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                        f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
-                        f"{E_CLOCK_TIME} {now_str()}\n\n"
-                        f"<pre>{html.escape(result.get('raw_error', '')[:400])}</pre>\n\n"
-                        f"{E_WARNING} <b>Maintenance auto-enabled. Please send fresh cookies.txt!</b>",
-                    )
+                await alert_admin(
+                    context.bot,
+                    f"{E_WARNING} <b>Download Failed</b>\n\n"
+                    f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                    f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
+                    f"{E_CLOCK_TIME} {now_str()}\n"
+                    f"Type: <code>{err_type}</code>\n\n"
+                    f"<pre>{html.escape(result.get('raw_error', result.get('error', ''))[:400])}</pre>",
+                )
+                if err_type == "private":
                     await status_msg.edit_text(
-                        f"{E_ARC_REACTOR} <b>Bot is entering maintenance mode.</b>\n\nPlease try again in a little while.",
+                        f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
+                        "This post is from a private account.\n"
+                        "I can only download from public accounts.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                elif err_type == "not_found":
+                    await status_msg.edit_text(
+                        f"{E_SKULL} <b>Post Not Found</b>\n\n"
+                        "This Instagram reel or post was removed, deleted, or the link is broken.",
                         parse_mode=ParseMode.HTML,
                     )
                 else:
-                    await alert_admin(
-                        context.bot,
-                        f"{E_WARNING} <b>Download Failed</b>\n\n"
-                        f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                        f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
-                        f"{E_CLOCK_TIME} {now_str()}\n"
-                        f"Type: <code>{err_type}</code>\n\n"
-                        f"<pre>{html.escape(result.get('raw_error', result.get('error', ''))[:400])}</pre>",
+                    await status_msg.edit_text(
+                        f"{E_BROKEN_HEART} <b>Download Failed</b>\n\n"
+                        "Could not retrieve this reel right now.\n"
+                        "Please verify that the link is a valid public reel and try again.",
+                        parse_mode=ParseMode.HTML,
                     )
-                    if err_type == "private":
-                        await status_msg.edit_text(
-                            f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
-                            "This post is from a private account.\n"
-                            "I can only download from public accounts.",
-                            parse_mode=ParseMode.HTML,
-                        )
-                    elif err_type == "not_found":
-                        await status_msg.edit_text(
-                            f"{E_SKULL} <b>Post Not Found</b>\n\n"
-                            "This Instagram reel or post was removed, deleted, or the link is broken.",
-                            parse_mode=ParseMode.HTML,
-                        )
-                    else:
-                        await status_msg.edit_text(
-                            f"{E_BROKEN_HEART} <b>Download Failed</b>\n\n"
-                            "Possible reasons:\n"
-                            "• The link is invalid or expired\n"
-                            "• The post was deleted\n"
-                            "• Instagram temporarily restricted access\n\n"
-                            "Please try again shortly.",
-                            parse_mode=ParseMode.HTML,
-                        )
+
                 return
 
             # ── Upload Phase (Animated transition) ────────────────────────
@@ -2954,20 +2908,17 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             disable_web_page_preview=True,
         )
 
-    elif text.startswith("🍪 Cookie:"):
-        if get_setting("cookie_alert_active", "0") == "1":
-            stop_cookie_reminder(context.job_queue)
-            await message.reply_text(
-                f"{E_CONFETTI} <b>Cookie alert cleared.</b>\n\n"
-                f"Remember to update cookies on Render or send fresh file, then turn off Maintenance.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=rkb_admin(),
-            )
-        else:
-            await message.reply_text(
-                f"{E_CONFETTI} Cookie status: <b>OK</b>\n\nNo active alerts.",
-                parse_mode=ParseMode.HTML,
-            )
+    elif text.startswith("⚡ Engine:") or text.startswith("🍪 Cookie:"):
+        await message.reply_text(
+            f"🚀 <b>Download Engine: 100% Cookie-Free Active!</b>\n\n"
+            f"• <b>Primary:</b> High-speed direct Meta CDN Embed Extractor\n"
+            f"• <b>Fallback:</b> Anonymous yt-dlp Extractor\n"
+            f"• <b>Status:</b> 🟢 Active & Ready\n"
+            f"• <b>Accounts/Cookies:</b> None required (Zero login walls / Zero auto-maintenance)",
+            parse_mode=ParseMode.HTML,
+            reply_markup=rkb_admin(),
+        )
+
 
     elif text == BTN_CLOSE_MENU:
         await message.reply_text(
@@ -4118,20 +4069,12 @@ async def post_init(application: Application) -> None:
     _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     logger.info("Semaphore ready (max_concurrent=%d)", MAX_CONCURRENT)
 
-    # Resume cookie reminder if it was active before restart
-    if get_setting("cookie_alert_active", "0") == "1":
-        start_cookie_reminder(application.job_queue)
-        logger.info("Resumed cookie reminder from previous session")
+    # Ensure bot is never stuck in legacy maintenance or cookie alert mode on startup
+    set_setting("maintenance_mode", "0")
+    set_setting("cookie_alert_active", "0")
+    stop_cookie_reminder(application.job_queue)
+    logger.info("Operating in 100% cookie-free public engine mode (maintenance OFF)")
 
-    # Schedule 30-minute proactive cookie health check
-    if not application.job_queue.get_jobs_by_name("cookie_health_check"):
-        application.job_queue.run_repeating(
-            cookie_health_check_job,
-            interval=1800,  # 30 min
-            first=120,      # first check in 2 min
-            name="cookie_health_check",
-        )
-        logger.info("Registered 30-min cookie health check job")
 
     # Schedule Scout Queue Auto-Dispatcher (runs every 30s)
     if not application.job_queue.get_jobs_by_name("scout_dispatcher"):

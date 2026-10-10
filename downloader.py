@@ -12,16 +12,19 @@ import uuid
 import shutil
 import random
 import logging
+import html
 import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from curl_cffi import requests as cffi_requests
 import yt_dlp
 
 logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 
 # ── Cookie file detection (runtime, not import-time) ──────────────────────────
@@ -440,16 +443,109 @@ def _extract_media_result(work_dir: Path, info: dict, result: dict) -> bool:
     return False
 
 
+def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
+    """
+    100% Cookie-free direct media extractor using Instagram's public embed endpoints.
+    - Zero accounts, sessions, or cookies required.
+    - Directly extracts high-speed .mp4 CDN streams from Meta servers.
+    - Extracts complete post captions.
+    - Processes video with ffmpeg anti-detection device profile injection.
+    """
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        return False
+
+    endpoints = [
+        f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
+        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
+        f"https://www.instagram.com/reel/{shortcode}/embed/",
+        f"https://www.instagram.com/p/{shortcode}/embed/",
+    ]
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    for endpoint in endpoints:
+        try:
+            r = cffi_requests.get(endpoint, headers=headers, impersonate="chrome124", timeout=12)
+            if r.status_code != 200 or len(r.text) < 1000:
+                continue
+
+            caption = ""
+            cap_match = re.search(r'<div class="Caption"[^>]*>(.*?)</div>', r.text, re.DOTALL)
+            if cap_match:
+                caption = html.unescape(re.sub(r'<[^>]+>', '', cap_match.group(1))).strip()
+
+            v_url = None
+            idx = r.text.find("video_url")
+            if idx != -1:
+                start_http = r.text.find("https:", idx)
+                if start_http != -1:
+                    end_quote = r.text.find('"', start_http)
+                    if end_quote != -1:
+                        cand = r.text[start_http:end_quote].replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
+                        if ".mp4" in cand:
+                            v_url = cand
+
+            if not v_url:
+                mp4_matches = re.findall(r'https:[^"\'<>\s]+?\.mp4[^"\'<>\s]*', r.text)
+                for m in mp4_matches:
+                    v_url = m.replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
+                    break
+
+            if v_url:
+                raw_video = work_dir / "raw_media.mp4"
+                v_resp = cffi_requests.get(v_url, impersonate="chrome124", timeout=35)
+                if v_resp.status_code == 200 and len(v_resp.content) > 10000:
+                    raw_video.write_bytes(v_resp.content)
+
+                    clean_video = work_dir / "clean_media.mp4"
+                    stripped = _strip_and_protect_video(raw_video, clean_video)
+                    final_path = clean_video if (stripped and clean_video.exists() and clean_video.stat().st_size > 1000) else raw_video
+
+                    result["success"] = True
+                    result["video_path"] = final_path
+                    result["caption"] = caption
+                    result["is_video"] = True
+                    logger.info("Direct cookie-free embed video download succeeded: %s (%.1f MB)", shortcode, final_path.stat().st_size / (1024 * 1024))
+                    return True
+
+            # If not a video, check for photo post
+            img_matches = re.findall(r'https:[^"\'<>\s]+?\.(?:jpg|jpeg|webp)[^"\'<>\s]*', r.text)
+            for m in img_matches:
+                img_url = m.replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
+                if "fbcdn.net" in img_url or "cdninstagram.com" in img_url:
+                    img_resp = cffi_requests.get(img_url, impersonate="chrome124", timeout=20)
+                    if img_resp.status_code == 200 and len(img_resp.content) > 2000:
+                        raw_img = work_dir / "media.jpg"
+                        raw_img.write_bytes(img_resp.content)
+                        result["success"] = True
+                        result["image_paths"] = [raw_img]
+                        result["caption"] = caption
+                        result["is_video"] = False
+                        logger.info("Direct cookie-free embed image download succeeded: %s", shortcode)
+                        return True
+
+        except Exception as exc:
+            logger.debug("Direct embed extractor error on %s: %s", endpoint, exc)
+
+    return False
+
+
 def download_instagram(url: str) -> dict:
     """
-    Download an Instagram post/reel/TV video with dual-tier resilience:
-    1. Primary tier (Default & Hassle-Free): Cookie-free public extraction.
-       - 95%+ of public reels download instantly without touching your account or cookies.
-       - Zero risk of Instagram account blocks or checkpoints.
-       - Works seamlessly even if no cookies exist at all.
-    2. Fallback tier: If public extraction is blocked by Instagram (login required, age-gated)
-       and cookies exist on the server, automatically fall back to cookies.txt.
-    3. Memory safe: strictly bounded for Render 512MB RAM.
+    Download an Instagram reel/post/video with 100% cookie-free architecture:
+    1. Primary Tier: Direct public Meta CDN embed stream extractor (Instant, zero cookies).
+    2. Fallback Tier: Anonymous yt-dlp cookie-free public extraction.
+    3. Anti-Detection: Unique device profile injection & perceptual hash protection.
+    4. Safe: Never requires accounts or cookies, never triggers maintenance mode!
     """
     session_id = uuid.uuid4().hex[:8]
     work_dir = DOWNLOAD_DIR / session_id
@@ -460,20 +556,25 @@ def download_instagram(url: str) -> dict:
         "video_path": None,
         "caption":    "",
         "error":      None,   # friendly message for user
-        "error_type": None,   # 'cookie' | 'private' | 'not_found' | 'generic'
+        "error_type": None,   # 'private' | 'not_found' | 'generic'
         "raw_error":  None,   # full error string for admin log
     }
 
-    cookies_available = bool(find_cookies_file())
+    # ── Tier 1: Direct Cookie-Free Embed Extractor (Fastest, High-Speed CDN) ──
+    try:
+        if download_via_direct_embed(url, work_dir, result):
+            return result
+    except Exception as exc:
+        logger.debug("Direct embed tier exception: %s", exc)
 
-    # ── Attempt 1: Cookie-Free Public Download (Default & Safe) ──
+    # ── Tier 2: Anonymous yt-dlp Cookie-Free Fallback ──
     try:
         ydl_opts_anon = _build_ydl_opts(work_dir, "media", use_cookies=False)
         with yt_dlp.YoutubeDL(ydl_opts_anon) as ydl_anon:
             info = ydl_anon.extract_info(url, download=True)
 
         if _extract_media_result(work_dir, info, result):
-            logger.info("Primary cookie-free download succeeded!")
+            logger.info("Cookie-free yt-dlp download succeeded!")
             return result
 
     except yt_dlp.utils.DownloadError as exc_1:
@@ -481,48 +582,17 @@ def download_instagram(url: str) -> dict:
         err_lower = err_msg.lower()
         result["raw_error"] = err_msg
 
-        # Check if Instagram is gating this post behind login or age restriction
-        needs_auth = any(
-            k in err_lower for k in ("login_required", "logged out", "checkpoint", "use --cookies", "empty media response", "restricted", "confirm your age", "sign in")
-        )
-
-        # ── Attempt 2: Fallback to cookies if available ──
-        if cookies_available and (needs_auth or "private" in err_lower):
-            logger.info("Cookie-free extraction hit auth wall (%s). Retrying with cookies.txt fallback...", err_msg)
-            try:
-                # Clean partial artifacts from first attempt
-                for tmp_f in work_dir.glob("media*"):
-                    try:
-                        tmp_f.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-
-                ydl_opts_auth = _build_ydl_opts(work_dir, "media_auth", use_cookies=True)
-                with yt_dlp.YoutubeDL(ydl_opts_auth) as ydl_auth:
-                    info_auth = ydl_auth.extract_info(url, download=True)
-
-                if _extract_media_result(work_dir, info_auth, result):
-                    logger.info("Authenticated cookie fallback succeeded!")
-                    return result
-            except Exception as exc_auth:
-                logger.warning("Cookie fallback also failed: %s", exc_auth)
-                result["raw_error"] = f"{err_msg} | Cookie fallback: {exc_auth}"
-
-        # Classify the final error
         if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
             result["error_type"] = "not_found"
             result["error"] = "This post or reel was deleted or is no longer available on Instagram."
         elif "private" in err_lower and "rate" not in err_lower:
             result["error_type"] = "private"
             result["error"] = "This account or post is *private*."
-        elif needs_auth:
-            result["error_type"] = "cookie"
-            result["error"] = "Instagram requires login for this post. Admin notified."
         else:
             result["error_type"] = "generic"
-            result["error"] = "Download failed. Please try again later."
+            result["error"] = "Download failed. Please ensure the link is a valid public reel."
 
-        logger.error("Download failed | type=%s | error=%s", result["error_type"], err_msg)
+        logger.warning("Download failed | type=%s | error=%s", result["error_type"], err_msg)
 
     except Exception as exc:
         result["error_type"] = "generic"
@@ -531,6 +601,7 @@ def download_instagram(url: str) -> dict:
         logger.exception("Unexpected download error")
 
     return result
+
 
 
 def cleanup_session(video_path: Path | str | None) -> None:
@@ -582,34 +653,9 @@ def extract_audio_from_video(video_path: Path, output_audio_path: Path | None = 
 
 def check_cookies_health() -> tuple[bool, str]:
     """
-    Validates Instagram session cookies:
-    1. Checks if cookies.txt exists and is non-empty
-    2. Inspects sessionid presence and expiry timestamp
+    Cookie-free engine status.
+    Instagram downloads are 100% cookie-free via public Meta CDN embed stream extraction.
     """
-    cookie_file = find_cookies_file()
-    if not cookie_file or not Path(cookie_file).is_file() or Path(cookie_file).stat().st_size == 0:
-        return False, "No active cookies.txt found on server"
+    return True, "100% Cookie-free public engine active"
 
-    try:
-        content = Path(cookie_file).read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        return False, f"Could not read cookies file: {exc}"
-
-    if "sessionid" not in content:
-        return False, "Cookies file does not contain an active Instagram 'sessionid'"
-
-    import time
-    now_ts = int(time.time())
-    for line in content.splitlines():
-        if "sessionid" in line:
-            parts = line.strip().split("\t")
-            if len(parts) >= 5:
-                try:
-                    exp = int(parts[4])
-                    if 0 < exp < now_ts:
-                        return False, f"Instagram sessionid expired on {time.ctime(exp)}"
-                except ValueError:
-                    pass
-
-    return True, "Cookies are valid"
 
