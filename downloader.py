@@ -458,10 +458,58 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
         return False
 
 
+def clean_instagram_caption(raw_text_or_html: str, username: str = "") -> tuple[str, str]:
+    """
+    Cleans raw Instagram caption (from embed HTML or yt-dlp):
+    1. Extracts username if present in <a class="CaptionUsername">...</a>
+    2. Completely removes <div class="CaptionComments">...</div> and comments block
+    3. Strips the leading CaptionUsername anchor so username is not glued to hashtags
+    4. Strips remaining HTML tags and unescapes entities
+    5. Strips trailing 'View all X comments', 'View more on Instagram', 'X comments'
+    6. Strips leading username text if still prepended to caption
+    """
+    if not raw_text_or_html:
+        return "", username
+
+    # 1. Extract username from CaptionUsername anchor if present
+    user_match = re.search(r'<a[^>]*class="[^"]*CaptionUsername[^"]*"[^>]*>(.*?)</a>', raw_text_or_html, re.I | re.DOTALL)
+    if user_match:
+        extracted_user = re.sub(r'<[^>]+>', '', user_match.group(1)).strip()
+        if extracted_user and not username:
+            username = extracted_user
+
+    # 2. Strip comments container (<div class="CaptionComments">...</div> or <a class="CaptionComments">...</a>)
+    cleaned = re.sub(r'<[^>]*class="[^"]*CaptionComments[^"]*"[^>]*>.*?<\/[^>]+>', '', raw_text_or_html, flags=re.DOTALL | re.I)
+
+    # 3. Strip the leading CaptionUsername anchor
+    cleaned = re.sub(r'<a[^>]*class="[^"]*CaptionUsername[^"]*"[^>]*>.*?</a>', '', cleaned, flags=re.DOTALL | re.I)
+
+    # 4. Strip any remaining HTML tags and unescape entities
+    text = re.sub(r'<[^>]+>', '', cleaned)
+    text = html.unescape(text).strip()
+
+    # 5. Remove trailing "View all X comments", "View more on Instagram", etc.
+    text = re.sub(r'View all \d+ comments.*$', '', text, flags=re.DOTALL | re.I).strip()
+    text = re.sub(r'View more on Instagram.*$', '', text, flags=re.DOTALL | re.I).strip()
+    text = re.sub(r'\b\d+\s+comments\s*$', '', text, flags=re.I).strip()
+
+    # 6. If caption still starts with username (e.g. "baldkid67#..." or "baldkid67 ..."), strip it
+    if username:
+        user_pattern = rf'^{re.escape(username)}\s*'
+        text = re.sub(user_pattern, '', text, flags=re.I).strip()
+
+    return text.strip(), username
+
+
 def _extract_media_result(work_dir: Path, info: dict, result: dict) -> bool:
     """Find and protect downloaded video or photos in work_dir."""
-    caption = info.get("description") or info.get("title") or ""
-    result["caption"] = caption.strip()
+    raw_caption = info.get("description") or info.get("title") or ""
+    uploader = info.get("uploader") or info.get("channel") or ""
+    if uploader and not result.get("author"):
+        result["author"] = uploader
+
+    cleaned_cap, _ = clean_instagram_caption(raw_caption, uploader)
+    result["caption"] = cleaned_cap
 
     video_files = list(work_dir.glob("*.mp4"))
     if not video_files:
@@ -501,12 +549,16 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
     100% Cookie-free direct media extractor using Instagram's public embed endpoints.
     - Zero accounts, sessions, or cookies required.
     - Directly extracts high-speed .mp4 CDN streams from Meta servers.
-    - Extracts complete post captions.
+    - Extracts complete post captions (cleanly strips username prefix & comments suffix).
     - Processes video with ffmpeg anti-detection device profile injection.
+    - Strictly prevents downloading static UI assets (e.g. App Store badges, icons).
+    - Strictly enforces that Reel links (/reel/) must ONLY return video media.
     """
     shortcode = extract_shortcode(url)
     if not shortcode:
         return False
+
+    is_reel_url = bool(re.search(r"instagram\.com/(?:reel|reels)/", url, re.I))
 
     endpoints = [
         f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
@@ -525,34 +577,70 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
+    BAD_IMAGE_PATTERNS = [
+        "static.cdninstagram.com",
+        "rsrc.php",
+        "app_store",
+        "play_store",
+        "favicon",
+        "assets",
+        "glyph",
+        "badge",
+        "button",
+    ]
+
     for endpoint in endpoints:
         try:
             r = cffi_requests.get(endpoint, headers=headers, impersonate="chrome124", timeout=12)
             if r.status_code != 200 or len(r.text) < 1000:
                 continue
 
+            # Check if this embed is an empty login shell or unavailable post
+            if 'isRichEmbed":false' in r.text and '"contextJSON":null' in r.text:
+                logger.debug("Embed returned minimal shell (login wall / restricted): %s", shortcode)
+                continue
+
+            # Extract and clean caption + author
             caption = ""
+            author_from_embed = ""
             cap_match = re.search(r'<div class="Caption"[^>]*>(.*?)</div>', r.text, re.DOTALL)
             if cap_match:
-                caption = html.unescape(re.sub(r'<[^>]+>', '', cap_match.group(1))).strip()
+                caption, author_from_embed = clean_instagram_caption(cap_match.group(0))
 
+            if author_from_embed and not result.get("author"):
+                result["author"] = author_from_embed
+
+            # Search for video URL
             v_url = None
-            idx = r.text.find("video_url")
-            if idx != -1:
-                start_http = r.text.find("https:", idx)
-                if start_http != -1:
-                    end_quote = r.text.find('"', start_http)
-                    if end_quote != -1:
-                        cand = r.text[start_http:end_quote].replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
-                        if ".mp4" in cand:
-                            v_url = cand
+            clean_page = r.text.replace(r"\/", "/").replace(r"\u0026", "&").replace("&amp;", "&")
 
-            if not v_url:
-                mp4_matches = re.findall(r'https:[^"\'<>\s]+?\.mp4[^"\'<>\s]*', r.text)
-                for m in mp4_matches:
-                    v_url = m.replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
+            # Strategy A: "video_url" in JSON scripts
+            v_matches = re.findall(r'"video_url"\s*:\s*"([^"]+)"', r.text)
+            for vm in v_matches:
+                cand = vm.replace(r"\/", "/").replace(r"\u0026", "&").replace("&amp;", "&").replace("\\", "")
+                if ".mp4" in cand:
+                    v_url = cand
                     break
 
+            # Strategy B: "contentUrl" in JSON-LD schema
+            if not v_url:
+                ld_matches = re.findall(r'"contentUrl"\s*:\s*"([^"]+)"', r.text)
+                for ldm in ld_matches:
+                    cand = ldm.replace(r"\/", "/").replace(r"\u0026", "&").replace("&amp;", "&").replace("\\", "")
+                    if ".mp4" in cand:
+                        v_url = cand
+                        break
+
+            # Strategy C: direct .mp4 URLs in cleaned page
+            if not v_url:
+                mp4_matches = re.findall(r'https://[^"\'<>\s]+?\.mp4[^"\'<>\s]*', clean_page)
+                for m in mp4_matches:
+                    cand = m.replace("\\", "")
+                    if "fbcdn.net" in cand or "cdninstagram.com" in cand:
+                        v_url = cand
+                        break
+
+            # Download and protect video if found
             if v_url:
                 raw_video = work_dir / "raw_media.mp4"
                 v_resp = cffi_requests.get(v_url, impersonate="chrome124", timeout=35)
@@ -570,13 +658,21 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
                     logger.info("Direct cookie-free embed video download succeeded: %s (%.1f MB)", shortcode, final_path.stat().st_size / (1024 * 1024))
                     return True
 
-            # If not a video, check for photo post
+            # If the user requested a Reel, NEVER fallback to image! Reels must ONLY be videos.
+            if is_reel_url:
+                continue
+
+            # Strategy D: Real user photo (ONLY for photo posts /p/, NEVER for reels)
             img_matches = re.findall(r'https:[^"\'<>\s]+?\.(?:jpg|jpeg|webp)[^"\'<>\s]*', r.text)
             for m in img_matches:
-                img_url = m.replace(r'\/', '/').replace(r'\u0026', '&').replace('\\', '')
-                if "fbcdn.net" in img_url or "cdninstagram.com" in img_url:
+                img_url = m.replace(r"\/", "/").replace(r"\u0026", "&").replace("&amp;", "&").replace("\\", "")
+                # Strictly reject static UI assets, logos, and badges
+                if any(bad in img_url.lower() for bad in BAD_IMAGE_PATTERNS):
+                    continue
+                # Real user post photos must be from scontent
+                if "scontent" in img_url or "instagram.f" in img_url or "fbcdn.net" in img_url:
                     img_resp = cffi_requests.get(img_url, impersonate="chrome124", timeout=20)
-                    if img_resp.status_code == 200 and len(img_resp.content) > 2000:
+                    if img_resp.status_code == 200 and len(img_resp.content) > 15000:  # Real photo is > 15KB
                         raw_img = work_dir / "media.jpg"
                         raw_img.write_bytes(img_resp.content)
                         result["success"] = True
@@ -594,11 +690,12 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
 
 def download_instagram(url: str) -> dict:
     """
-    Download an Instagram reel/post/video with 100% cookie-free architecture:
+    Download an Instagram reel/post/video with multi-tier architecture:
     1. Primary Tier: Direct public Meta CDN embed stream extractor (Instant, zero cookies).
-    2. Fallback Tier: Anonymous yt-dlp cookie-free public extraction.
-    3. Anti-Detection: Unique device profile injection & perceptual hash protection.
-    4. Safe: Never requires accounts or cookies, never triggers maintenance mode!
+    2. Fallback Tier A: Anonymous yt-dlp cookie-free public extraction.
+    3. Fallback Tier B: Authenticated yt-dlp extraction (if cookies exist, for login-walled reels).
+    4. Anti-Detection: Unique device profile injection & perceptual protection.
+    5. Safe: Never requires accounts for public reels, never triggers maintenance mode!
     """
     session_id = uuid.uuid4().hex[:8]
     work_dir = DOWNLOAD_DIR / session_id
@@ -607,7 +704,9 @@ def download_instagram(url: str) -> dict:
     result = {
         "success":    False,
         "video_path": None,
+        "image_paths": None,
         "caption":    "",
+        "author":     "",
         "error":      None,   # friendly message for user
         "error_type": None,   # 'private' | 'not_found' | 'generic'
         "raw_error":  None,   # full error string for admin log
@@ -630,28 +729,48 @@ def download_instagram(url: str) -> dict:
             logger.info("Cookie-free yt-dlp download succeeded!")
             return result
 
-    except yt_dlp.utils.DownloadError as exc_1:
-        err_msg = str(exc_1)
-        err_lower = err_msg.lower()
-        result["raw_error"] = err_msg
+    except yt_dlp.utils.DownloadError as exc_anon:
+        logger.debug("Anonymous yt-dlp download failed: %s", exc_anon)
 
-        if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
+    # ── Tier 3: Authenticated yt-dlp Fallback (if cookies are configured on host) ──
+    cookies_path = find_cookies_file()
+    if cookies_path:
+        try:
+            logger.info("Attempting authenticated yt-dlp fallback via %s...", cookies_path)
+            ydl_opts_auth = _build_ydl_opts(work_dir, "media", use_cookies=True)
+            with yt_dlp.YoutubeDL(ydl_opts_auth) as ydl_auth:
+                info_auth = ydl_auth.extract_info(url, download=True)
+
+            if _extract_media_result(work_dir, info_auth, result):
+                logger.info("Authenticated yt-dlp download succeeded!")
+                return result
+        except yt_dlp.utils.DownloadError as exc_auth:
+            err_msg = str(exc_auth)
+            err_lower = err_msg.lower()
+            result["raw_error"] = err_msg
+
+            if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
+                result["error_type"] = "not_found"
+                result["error"] = "This post or reel was deleted or is no longer available on Instagram."
+            elif "private" in err_lower and "rate" not in err_lower:
+                result["error_type"] = "private"
+                result["error"] = "This account or post is *private*."
+            else:
+                result["error_type"] = "generic"
+                result["error"] = "Download failed. Please ensure the link is a valid public reel."
+
+            logger.warning("Authenticated yt-dlp fallback failed | type=%s | error=%s", result["error_type"], err_msg)
+        except Exception as exc_auth_gen:
+            logger.debug("Authenticated yt-dlp fallback error: %s", exc_auth_gen)
+
+    # If all tiers failed, return user-friendly error
+    if not result.get("error"):
+        if "/reel/" in url.lower() or "/reels/" in url.lower():
             result["error_type"] = "not_found"
-            result["error"] = "This post or reel was deleted or is no longer available on Instagram."
-        elif "private" in err_lower and "rate" not in err_lower:
-            result["error_type"] = "private"
-            result["error"] = "This account or post is *private*."
+            result["error"] = "Could not retrieve this reel. It may be age-restricted, login-protected, or removed."
         else:
             result["error_type"] = "generic"
-            result["error"] = "Download failed. Please ensure the link is a valid public reel."
-
-        logger.warning("Download failed | type=%s | error=%s", result["error_type"], err_msg)
-
-    except Exception as exc:
-        result["error_type"] = "generic"
-        result["error"] = "An unexpected error occurred."
-        result["raw_error"] = str(exc)
-        logger.exception("Unexpected download error")
+            result["error"] = "Download failed. Please ensure the link is a valid public reel or post."
 
     return result
 
