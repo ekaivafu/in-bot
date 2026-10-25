@@ -1415,7 +1415,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await anim_task
 
             # ── Handle failure ─────────────────────────────────────────────
-            if not result["success"]:
+            if not result or not isinstance(result, dict) or not result.get("success"):
                 if heart_msg:
                     try:
                         await heart_msg.delete()
@@ -1425,22 +1425,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     log_download(user.id, text, False)
                 except Exception:
                     pass
-                err_type = result.get("error_type", "generic")
 
-                await alert_admin(
-                    context.bot,
-                    f"{E_WARNING} <b>Download Failed</b>\n\n"
-                    f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-                    f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
-                    f"{E_CLOCK_TIME} {now_str()}\n"
-                    f"Type: <code>{err_type}</code>\n\n"
-                    f"<pre>{html.escape(result.get('raw_error', result.get('error', ''))[:400])}</pre>",
-                )
+                err_type = result.get("error_type", "generic") if isinstance(result, dict) else "generic"
+                raw_err_str = ""
+                if isinstance(result, dict):
+                    raw_err_str = str(result.get("raw_error") or result.get("error") or "")
+
+                try:
+                    await alert_admin(
+                        context.bot,
+                        f"{E_WARNING} <b>Download Failed</b>\n\n"
+                        f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                        f"{E_PIN_LINK} <code>{html.escape(text[:100])}</code>\n"
+                        f"{E_CLOCK_TIME} {now_str()}\n"
+                        f"Type: <code>{err_type}</code>\n\n"
+                        f"<pre>{html.escape(raw_err_str[:400])}</pre>",
+                    )
+                except Exception as alert_exc:
+                    logger.warning("Failed to send admin failure alert: %s", alert_exc)
+
                 if err_type == "private":
                     await status_msg.edit_text(
                         f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
                         f"This post is from a private account on {platform_name}.\n"
                         "I can only download from public accounts.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                elif err_type == "restricted":
+                    await status_msg.edit_text(
+                        f"{E_BLACK_MASK} <b>Audience Restricted</b>\n\n"
+                        f"This {platform_name} post or reel has age or audience restrictions set by the creator.\n"
+                        "It cannot be accessed without an authenticated, age-verified account.",
                         parse_mode=ParseMode.HTML,
                     )
                 elif err_type == "not_found":
@@ -1639,7 +1654,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
 
             finally:
-                main_path = video_path or (image_paths[0] if image_paths else None)
+                main_path = video_path or (image_paths[0] if (image_paths and isinstance(image_paths, list) and len(image_paths) > 0) else None)
                 cleanup_session(main_path)
                 _active_count = max(0, _active_count - 1)
 
@@ -1650,13 +1665,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception:
                 pass
         logger.exception("Unexpected error in handle_message")
-        await alert_admin(
-            context.bot,
-            f"{E_WARNING} <b>Unexpected Error</b>\n\n"
-            f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
-            f"{E_CLOCK_TIME} {now_str()}\n"
-            f"<pre>{html.escape(str(exc)[:400])}</pre>",
-        )
+        try:
+            await alert_admin(
+                context.bot,
+                f"{E_WARNING} <b>Unexpected Error</b>\n\n"
+                f"👤 {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                f"{E_CLOCK_TIME} {now_str()}\n"
+                f"<pre>{html.escape(str(exc)[:400])}</pre>",
+            )
+        except Exception:
+            pass
         if 'status_msg' in locals() and status_msg:
             try:
                 await status_msg.edit_text(f"{E_BROKEN_HEART} <b>Something went wrong. Please try again.</b>", parse_mode=ParseMode.HTML)

@@ -514,6 +514,8 @@ def clean_instagram_caption(raw_text_or_html: str, username: str = "") -> tuple[
 
 def _extract_media_result(work_dir: Path, info: dict, result: dict) -> bool:
     """Find and protect downloaded video or photos in work_dir."""
+    if not info or not isinstance(info, dict):
+        return False
     raw_caption = info.get("description") or info.get("title") or ""
     uploader = info.get("uploader") or info.get("channel") or ""
     if uploader and not result.get("author"):
@@ -799,17 +801,20 @@ def download_instagram_polaris(shortcode: str, work_dir: Path, result: dict) -> 
         result["shortcode"] = shortcode
 
         carousel = prod.get("carousel_media") or []
-        if carousel:
+        if carousel and isinstance(carousel, list):
             # ── Multi-Slide Carousel (Photos and/or Videos) ──
             downloaded_images = []
             downloaded_videos = []
             media_items = []
 
             for idx, item in enumerate(carousel[:10]):
+                if not isinstance(item, dict):
+                    continue
                 vids = item.get("video_versions") or []
-                imgs = item.get("image_versions2", {}).get("candidates") or []
+                image_v2 = item.get("image_versions2") or {}
+                imgs = image_v2.get("candidates") if isinstance(image_v2, dict) else []
 
-                if vids:
+                if vids and isinstance(vids, list) and len(vids) > 0 and isinstance(vids[0], dict) and vids[0].get("url"):
                     v_url = vids[0]["url"]
                     resp = session.get(v_url, timeout=30)
                     if resp.status_code == 200 and len(resp.content) > 5000:
@@ -822,7 +827,7 @@ def download_instagram_polaris(shortcode: str, work_dir: Path, result: dict) -> 
                         else:
                             downloaded_videos.append(v_file)
                             media_items.append({"type": "video", "path": v_file})
-                elif imgs:
+                elif imgs and isinstance(imgs, list) and len(imgs) > 0 and isinstance(imgs[0], dict) and imgs[0].get("url"):
                     img_url = imgs[0]["url"]
                     resp = session.get(img_url, timeout=20)
                     if resp.status_code == 200 and len(resp.content) > 1000:
@@ -846,9 +851,10 @@ def download_instagram_polaris(shortcode: str, work_dir: Path, result: dict) -> 
         else:
             # ── Single Item (Photo or Video) ──
             vids = prod.get("video_versions") or []
-            imgs = prod.get("image_versions2", {}).get("candidates") or []
+            image_v2 = prod.get("image_versions2") or {}
+            imgs = image_v2.get("candidates") if isinstance(image_v2, dict) else []
 
-            if vids:
+            if vids and isinstance(vids, list) and len(vids) > 0 and isinstance(vids[0], dict) and vids[0].get("url"):
                 v_url = vids[0]["url"]
                 resp = session.get(v_url, timeout=35)
                 if resp.status_code == 200 and len(resp.content) > 5000:
@@ -864,7 +870,7 @@ def download_instagram_polaris(shortcode: str, work_dir: Path, result: dict) -> 
                     result["success"] = True
                     logger.info("Polaris video download succeeded: %s (%.1f MB)", shortcode, final_path.stat().st_size / (1024 * 1024))
                     return True
-            elif imgs:
+            elif imgs and isinstance(imgs, list) and len(imgs) > 0 and isinstance(imgs[0], dict) and imgs[0].get("url"):
                 img_url = imgs[0]["url"]
                 resp = session.get(img_url, timeout=20)
                 if resp.status_code == 200 and len(resp.content) > 1000:
@@ -932,12 +938,25 @@ def download_instagram(url: str) -> dict:
         with yt_dlp.YoutubeDL(ydl_opts_anon) as ydl_anon:
             info = ydl_anon.extract_info(url, download=True)
 
-        if _extract_media_result(work_dir, info, result):
+        if info and _extract_media_result(work_dir, info, result):
             logger.info("Cookie-free yt-dlp download succeeded!")
             return result
 
-    except yt_dlp.utils.DownloadError as exc_anon:
+    except Exception as exc_anon:
+        err_msg = str(exc_anon)
+        err_lower = err_msg.lower()
+        result["raw_error"] = err_msg
         logger.debug("Anonymous yt-dlp download failed: %s", exc_anon)
+
+        if any(w in err_lower for w in ("audience", "available to everyone", "age", "certain audiences", "restricted", "sensitive")):
+            result["error_type"] = "restricted"
+            result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
+        elif "private" in err_lower and "rate" not in err_lower:
+            result["error_type"] = "private"
+            result["error"] = "This account or post is *private*."
+        elif any(w in err_lower for w in ("not found", "does not exist", "removed")):
+            result["error_type"] = "not_found"
+            result["error"] = "This post or reel was deleted or is no longer available on Instagram."
 
     # ── Tier 3: Authenticated yt-dlp Fallback (if cookies are configured on host) ──
     cookies_path = find_cookies_file()
@@ -948,15 +967,18 @@ def download_instagram(url: str) -> dict:
             with yt_dlp.YoutubeDL(ydl_opts_auth) as ydl_auth:
                 info_auth = ydl_auth.extract_info(url, download=True)
 
-            if _extract_media_result(work_dir, info_auth, result):
+            if info_auth and _extract_media_result(work_dir, info_auth, result):
                 logger.info("Authenticated yt-dlp download succeeded!")
                 return result
-        except yt_dlp.utils.DownloadError as exc_auth:
+        except Exception as exc_auth:
             err_msg = str(exc_auth)
             err_lower = err_msg.lower()
             result["raw_error"] = err_msg
 
-            if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
+            if any(w in err_lower for w in ("audience", "available to everyone", "age", "certain audiences", "restricted", "sensitive")):
+                result["error_type"] = "restricted"
+                result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
+            elif any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
                 result["error_type"] = "not_found"
                 result["error"] = "This post or reel was deleted or is no longer available on Instagram."
             elif "private" in err_lower and "rate" not in err_lower:
@@ -967,16 +989,16 @@ def download_instagram(url: str) -> dict:
                 result["error"] = "Download failed. Please ensure the link is a valid public reel."
 
             logger.warning("Authenticated yt-dlp fallback failed | type=%s | error=%s", result["error_type"], err_msg)
-        except Exception as exc_auth_gen:
-            logger.debug("Authenticated yt-dlp fallback error: %s", exc_auth_gen)
 
     # If all tiers failed, return user-friendly error
     if not result.get("error"):
-        if "/reel/" in url.lower() or "/reels/" in url.lower():
-            result["error_type"] = "not_found"
+        if result.get("error_type") == "restricted":
+            result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
+        elif "/reel/" in url.lower() or "/reels/" in url.lower():
+            result["error_type"] = result.get("error_type") or "not_found"
             result["error"] = "Could not retrieve this reel. It may be age-restricted, login-protected, or removed."
         else:
-            result["error_type"] = "generic"
+            result["error_type"] = result.get("error_type") or "generic"
             result["error"] = "Download failed. Please ensure the link is a valid public reel or post."
 
     return result
@@ -1237,10 +1259,25 @@ def download_media(url: str) -> dict:
     - Auto-detects whether the URL is TikTok or Instagram.
     - Routes to the appropriate high-speed cookie-free engine.
     - Always applies anti-detection metadata and perceptual protection.
+    - Never returns None or throws unhandled exception.
     """
-    if is_tiktok_url(url):
-        return download_tiktok(url)
-    return download_instagram(url)
+    try:
+        if is_tiktok_url(url):
+            return download_tiktok(url)
+        return download_instagram(url)
+    except Exception as exc:
+        logger.exception("Top-level download_media failure: %s", exc)
+        return {
+            "success": False,
+            "video_path": None,
+            "image_paths": None,
+            "media_items": [],
+            "caption": "",
+            "author": "",
+            "error": "Failed to process download link. Please try again.",
+            "error_type": "generic",
+            "raw_error": str(exc),
+        }
 
 
 def extract_audio_from_video(video_path: Path, output_audio_path: Path | None = None) -> Path | None:
