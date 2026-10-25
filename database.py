@@ -66,13 +66,35 @@ if USE_POSTGRES:
         USE_POSTGRES = False
 
 
+class _SQLiteCompatCursor:
+    """Wrapper around sqlite3.Cursor that transparently handles PostgreSQL SQL dialects."""
+    def __init__(self, cur):
+        self._cur = cur
+
+    def execute(self, sql, params=None):
+        clean_sql = sql.replace("%s", "?").replace("NOW()", "datetime('now')")
+        if params is not None:
+            return self._cur.execute(clean_sql, params)
+        return self._cur.execute(clean_sql)
+
+    def executemany(self, sql, seq_of_params):
+        clean_sql = sql.replace("%s", "?").replace("NOW()", "datetime('now')")
+        return self._cur.executemany(clean_sql, seq_of_params)
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
 @contextmanager
 def get_db_cursor():
     """
     Context manager yielding a database cursor (Postgres or SQLite).
     Handles commit, rollback, connection liveness, and SSL resets from Neon cold-starts.
+    Automatically fails over to SQLite if PostgreSQL/Neon is unreachable or quota-exceeded.
     """
     global _pg_pool, USE_POSTGRES
+    conn = None
+
     if USE_POSTGRES:
         import psycopg2
 
@@ -85,7 +107,6 @@ def get_db_cursor():
                 keepalives_count=5,
             )
 
-        conn = None
         # Try to get a pooled connection, recreate pool on failure
         with _pg_lock:
             try:
@@ -108,52 +129,75 @@ def get_db_cursor():
                 except Exception as exc:
                     logger.error("Failed to acquire PostgreSQL connection from pool: %s", exc)
                     # Last resort: direct connection
-                    conn = _fresh_conn()
+                    try:
+                        conn = _fresh_conn()
+                    except Exception as exc_direct:
+                        logger.warning(
+                            "PostgreSQL unreachable/quota exceeded (%s). Automatically falling back to SQLite.",
+                            exc_direct,
+                        )
+                        USE_POSTGRES = False
+                        _pg_pool = None
+                        conn = None
 
         # Ping to verify the connection is alive (catches SSL resets from Neon sleep)
-        try:
-            conn.cursor().execute("SELECT 1")
-        except Exception:
+        if conn is not None:
             try:
-                conn.close()
+                conn.cursor().execute("SELECT 1")
             except Exception:
-                pass
-            conn = _fresh_conn()
-
-        try:
-            with conn.cursor() as cur:
-                yield cur
-            conn.commit()
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
-        finally:
-            with _pg_lock:
                 try:
-                    if _pg_pool:
-                        _pg_pool.putconn(conn)
-                    else:
-                        conn.close()
+                    conn.close()
                 except Exception:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-    else:
-        with _sqlite_lock:
-            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+                    pass
+                try:
+                    conn = _fresh_conn()
+                except Exception as exc_fresh:
+                    logger.warning(
+                        "PostgreSQL reconnect failed (%s). Automatically falling back to SQLite.",
+                        exc_fresh,
+                    )
+                    USE_POSTGRES = False
+                    _pg_pool = None
+                    conn = None
+
+        if conn is not None:
             try:
-                cur = conn.cursor()
-                yield cur
+                with conn.cursor() as cur:
+                    yield cur
                 conn.commit()
             except Exception:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 raise
             finally:
-                conn.close()
+                with _pg_lock:
+                    try:
+                        if _pg_pool and conn:
+                            _pg_pool.putconn(conn)
+                        elif conn:
+                            conn.close()
+                    except Exception:
+                        try:
+                            if conn:
+                                conn.close()
+                        except Exception:
+                            pass
+            return
+
+    # Fallback to SQLite (either USE_POSTGRES is False or Postgres connection failed)
+    with _sqlite_lock:
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        try:
+            cur = _SQLiteCompatCursor(conn.cursor())
+            yield cur
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 # ── Internal Migration ─────────────────────────────────────────────────────────
@@ -223,7 +267,130 @@ def _migrate_from_sqlite() -> None:
 
 
 # ── Init ───────────────────────────────────────────────────────────────────────
+def _init_sqlite_schema() -> None:
+    """Ensure all required tables and columns exist in SQLite bot_data.db."""
+    with _sqlite_lock:
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        try:
+            cur = conn.cursor()
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id    INTEGER PRIMARY KEY,
+                    username   TEXT    DEFAULT '',
+                    first_name TEXT    DEFAULT '',
+                    joined_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id   INTEGER NOT NULL,
+                    url       TEXT    DEFAULT '',
+                    success   INTEGER NOT NULL DEFAULT 0,
+                    ts        TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS channels (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id     TEXT UNIQUE NOT NULL,
+                    title       TEXT NOT NULL,
+                    invite_link TEXT DEFAULT '',
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS media_cache (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT UNIQUE NOT NULL,
+                    video_file_id TEXT DEFAULT '',
+                    audio_file_id TEXT DEFAULT '',
+                    caption       TEXT DEFAULT '',
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS creator_watchlist (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username   TEXT UNIQUE NOT NULL,
+                    added_by   INTEGER DEFAULT 0,
+                    active     INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS scout_seen_reels (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT UNIQUE NOT NULL,
+                    creator       TEXT NOT NULL,
+                    likes         INTEGER DEFAULT 0,
+                    posted_date   TEXT DEFAULT '',
+                    discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    status        TEXT DEFAULT 'passed'
+                );
+
+                CREATE TABLE IF NOT EXISTS scout_queue (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shortcode     TEXT NOT NULL,
+                    creator       TEXT NOT NULL,
+                    likes         INTEGER DEFAULT 0,
+                    video_file_id TEXT DEFAULT '',
+                    caption       TEXT DEFAULT '',
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    dispatched    INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS user_watchlist (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL,
+                    username   TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(user_id, username)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_scout_limits (
+                    user_id      INTEGER PRIMARY KEY,
+                    custom_limit INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS child_servers (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name              TEXT NOT NULL,
+                    render_service_id TEXT DEFAULT '',
+                    url               TEXT DEFAULT '',
+                    uptimerobot_id    TEXT DEFAULT '',
+                    active            INTEGER DEFAULT 1,
+                    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+            """)
+
+            for stmt in [
+                "ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL",
+                "ALTER TABLE creator_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
+                "ALTER TABLE creator_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+                "ALTER TABLE creator_watchlist ADD COLUMN last_scouted_at TEXT DEFAULT NULL",
+                "ALTER TABLE creator_watchlist ADD COLUMN last_scout_status TEXT DEFAULT ''",
+                "ALTER TABLE creator_watchlist ADD COLUMN reels_checked_count INTEGER DEFAULT 0",
+                "ALTER TABLE creator_watchlist ADD COLUMN max_likes_found INTEGER DEFAULT 0",
+                "ALTER TABLE user_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
+                "ALTER TABLE user_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
+                "ALTER TABLE child_servers ADD COLUMN last_heartbeat TEXT DEFAULT NULL",
+            ]:
+                try:
+                    cur.execute(stmt)
+                except Exception:
+                    pass
+            conn.commit()
+        finally:
+            conn.close()
+
+
+# ── Init ───────────────────────────────────────────────────────────────────────
 def init_db() -> None:
+    global USE_POSTGRES
+    # 1. Always ensure local SQLite schema is fully initialized as fallback/local store
+    _init_sqlite_schema()
+
     if USE_POSTGRES:
         # Retry up to 3 times — Neon wakes from sleep and the first SSL connection
         # sometimes drops before init queries can execute.
@@ -358,116 +525,16 @@ def init_db() -> None:
                 logger.warning("init_db attempt %d/3 failed: %s", attempt, exc)
                 if attempt < 3:
                     time.sleep(2 * attempt)  # 2s, 4s
-        raise RuntimeError(f"init_db failed after 3 attempts: {last_exc}") from last_exc
+
+        logger.warning(
+            "init_db: PostgreSQL unreachable or quota exceeded after 3 attempts (%s). Automatically falling back to SQLite.",
+            last_exc,
+        )
+        USE_POSTGRES = False
+        with get_db_cursor() as cur:
+            _load_caches(cur)
     else:
         with get_db_cursor() as cur:
-            cur.executescript("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id    INTEGER PRIMARY KEY,
-                    username   TEXT    DEFAULT '',
-                    first_name TEXT    DEFAULT '',
-                    joined_at  TEXT    NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS downloads (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id   INTEGER NOT NULL,
-                    url       TEXT    DEFAULT '',
-                    success   INTEGER NOT NULL DEFAULT 0,
-                    ts        TEXT    NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS channels (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id     TEXT UNIQUE NOT NULL,
-                    title       TEXT NOT NULL,
-                    invite_link TEXT DEFAULT '',
-                    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS media_cache (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    shortcode     TEXT UNIQUE NOT NULL,
-                    video_file_id TEXT DEFAULT '',
-                    audio_file_id TEXT DEFAULT '',
-                    caption       TEXT DEFAULT '',
-                    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS creator_watchlist (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username   TEXT UNIQUE NOT NULL,
-                    added_by   INTEGER DEFAULT 0,
-                    active     INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS scout_seen_reels (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    shortcode     TEXT UNIQUE NOT NULL,
-                    creator       TEXT NOT NULL,
-                    likes         INTEGER DEFAULT 0,
-                    posted_date   TEXT DEFAULT '',
-                    discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    status        TEXT DEFAULT 'passed'
-                );
-
-                CREATE TABLE IF NOT EXISTS scout_queue (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    shortcode     TEXT NOT NULL,
-                    creator       TEXT NOT NULL,
-                    likes         INTEGER DEFAULT 0,
-                    video_file_id TEXT DEFAULT '',
-                    caption       TEXT DEFAULT '',
-                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                    dispatched    INTEGER DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS user_watchlist (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id    INTEGER NOT NULL,
-                    username   TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE(user_id, username)
-                );
-
-                CREATE TABLE IF NOT EXISTS user_scout_limits (
-                    user_id      INTEGER PRIMARY KEY,
-                    custom_limit INTEGER NOT NULL DEFAULT 1
-                );
-
-                CREATE TABLE IF NOT EXISTS child_servers (
-                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name              TEXT NOT NULL,
-                    render_service_id TEXT DEFAULT '',
-                    url               TEXT DEFAULT '',
-                    uptimerobot_id    TEXT DEFAULT '',
-                    active            INTEGER DEFAULT 1,
-                    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-            """)
-
-            for stmt in [
-                "ALTER TABLE creator_watchlist ADD COLUMN assigned_worker_id INTEGER DEFAULT NULL",
-                "ALTER TABLE creator_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
-                "ALTER TABLE creator_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
-                "ALTER TABLE creator_watchlist ADD COLUMN last_scouted_at TEXT DEFAULT NULL",
-                "ALTER TABLE creator_watchlist ADD COLUMN last_scout_status TEXT DEFAULT ''",
-                "ALTER TABLE creator_watchlist ADD COLUMN reels_checked_count INTEGER DEFAULT 0",
-                "ALTER TABLE creator_watchlist ADD COLUMN max_likes_found INTEGER DEFAULT 0",
-                "ALTER TABLE user_watchlist ADD COLUMN min_likes INTEGER DEFAULT 5000",
-                "ALTER TABLE user_watchlist ADD COLUMN max_days REAL DEFAULT 5.0",
-                "ALTER TABLE child_servers ADD COLUMN last_heartbeat TEXT DEFAULT NULL",
-            ]:
-                try:
-                    cur.execute(stmt)
-                except Exception:
-                    pass
             _load_caches(cur)
         logger.info("Database initialized (SQLite mode with in-memory caching)")
 
@@ -583,13 +650,16 @@ def get_all_user_ids() -> list[int]:
 
 # ── Downloads ──────────────────────────────────────────────────────────────────
 def log_download(user_id: int, url: str, success: bool) -> None:
-    placeholder = "%s" if USE_POSTGRES else "?"
-    time_fn = "NOW()" if USE_POSTGRES else "datetime('now')"
-    with get_db_cursor() as cur:
-        cur.execute(
-            f"INSERT INTO downloads (user_id, url, success, ts) VALUES ({placeholder}, {placeholder}, {placeholder}, {time_fn})",
-            (user_id, url, 1 if success else 0),
-        )
+    try:
+        placeholder = "%s" if USE_POSTGRES else "?"
+        time_fn = "NOW()" if USE_POSTGRES else "datetime('now')"
+        with get_db_cursor() as cur:
+            cur.execute(
+                f"INSERT INTO downloads (user_id, url, success, ts) VALUES ({placeholder}, {placeholder}, {placeholder}, {time_fn})",
+                (user_id, url, 1 if success else 0),
+            )
+    except Exception as exc:
+        logger.warning("log_download metric logging failed (non-fatal): %s", exc)
 
 
 # ── Stats ──────────────────────────────────────────────────────────────────────

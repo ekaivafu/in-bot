@@ -2532,7 +2532,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     supports_streaming=True,
                     reply_markup=kb_video_actions(shortcode),
                 )
-                log_download(user.id, text, True)
+                try:
+                    log_download(user.id, text, True)
+                except Exception:
+                    pass
                 logger.info("Instant cache hit | user=%s | shortcode=%s", user.id, shortcode)
                 return
             except Exception as exc:
@@ -2622,7 +2625,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await heart_msg.delete()
                     except Exception:
                         pass
-                log_download(user.id, text, False)
+                try:
+                    log_download(user.id, text, False)
+                except Exception:
+                    pass
                 err_type = result.get("error_type", "generic")
 
                 await alert_admin(
@@ -2773,8 +2779,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 except Exception:
                                     pass
 
-                log_download(user.id, text, True)
-                logger.info("DL done  | user=%s", user.id)
+                try:
+                    log_download(user.id, text, True)
+                    logger.info("DL done  | user=%s", user.id)
+                except Exception as db_exc:
+                    logger.warning("Download metric log error (non-fatal): %s", db_exc)
 
                 # Delete temporary download messages (heart emoji & progress status)
                 for m in (heart_msg, status_msg):
@@ -2790,7 +2799,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await heart_msg.delete()
                     except Exception:
                         pass
-                log_download(user.id, text, False)
+                try:
+                    log_download(user.id, text, False)
+                except Exception:
+                    pass
                 logger.exception("Send media failed")
                 await alert_admin(
                     context.bot,
