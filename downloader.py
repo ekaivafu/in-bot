@@ -264,6 +264,36 @@ def _get_random_anti_detect_params() -> dict:
     - Micro temporal speed jitter (1-1.5%) shifting cuts and motion vectors
     - Full container metadata strip + randomized real camera device profile injection
     """
+def _has_audio_stream(video_path: Path) -> bool:
+    """Check if the video has an audio stream via ffprobe."""
+    if not shutil.which("ffprobe"):
+        return True
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(video_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return "audio" in res.stdout.strip().lower()
+    except Exception:
+        return True
+
+
+def _get_random_anti_detect_params(has_audio: bool = True) -> dict:
+    """
+    Elite Anti-Detection Parameter Matrix:
+    1. Keyframe 0 Focus-Pull Intro: Replaces Frame 0 / Thumbnail with 7 blurred intro frames (~0.23s)
+       to completely defeat spatial perceptual cover hashes and initial keyframe signatures.
+    2. Coordinate Micro-Rotation: 0.012 rad (~0.69°) rotation to shift every pixel coordinate vector.
+    3. Dimension Normalization: Crop & scale ensuring strictly even dimensions for H.264 yuv420p.
+    4. Perceptual Masks: Dynamic radial vignette + enhanced saturation + temporal noise grain.
+    5. Acoustic Evasion: 233ms sync delay + 1.2ms flanger + dual-band parametric EQ.
+    6. GOP Structure: Fixed GOP 30 (-g 30 -bf 2) for fresh bitstream cadence.
+    7. Container Profile: Randomized device metadata from real camera models.
+    """
     profile = random.choice(DEVICE_PROFILES)
 
     # Random realistic timestamp offset (between 2 to 300 seconds ago)
@@ -271,58 +301,47 @@ def _get_random_anti_detect_params() -> dict:
     creation_dt = datetime.now(timezone.utc) - timedelta(seconds=jitter_sec)
     iso_time = creation_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # 1. Real 4% - 6% spatial crop & dynamic Lanczos zoom (defeats spatial grid & SSCD matching)
-    crop_ratio = round(random.uniform(0.940, 0.960), 3)  # 4% to 6% crop
-    crop_filter = (
-        f"crop=w=trunc(in_w*{crop_ratio}/2)*2:"
-        f"h=trunc(in_h*{crop_ratio}/2)*2:"
-        f"x=(in_w-out_w)/2:y=(in_h-out_h)/2,"
-        f"scale=w=trunc(iw/{crop_ratio}/2)*2:"
-        f"h=trunc(ih/{crop_ratio}/2)*2:flags=lanczos"
-    )
+    rot_angle = round(random.choice([0.012, -0.012]), 4)
+    vignette_angle = round(random.uniform(0.33, 0.38), 3)
 
-    # 2. Subtle radial corner vignette (shifts quadrant luminance vectors without obscuring subject)
-    vignette_angle = round(random.uniform(0.32, 0.38), 3)
-    vignette_filter = f"vignette=angle={vignette_angle}"
-
-    # 3. Enhanced saturation & micro-color grading (masks pixel marks, DCT artifacts & enhances visual hook)
     contrast = round(random.uniform(1.025, 1.045), 3)
     brightness = round(random.uniform(0.003, 0.007), 4)
     saturation = round(random.uniform(1.055, 1.085), 3)
     gamma = round(random.uniform(0.995, 1.005), 3)
-    eq_filter = f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma}"
 
-    # 4. Dynamic temporal noise (subtle grain on luma & chroma breaks DCT 8x8 block matching & disguises pixel marks)
     noise_luma = random.choice([3, 4])
     noise_chroma = random.choice([2, 3])
-    noise_filter = f"noise=c0s={noise_luma}:c0f=t+u:c1s={noise_chroma}:c1f=t"
-    unsharp_filter = "unsharp=3:3:0.25"
 
-    # 5. Temporal speed micro-shift (shifts all motion vectors & cut timestamps)
-    speed = round(random.choice([random.uniform(1.008, 1.018), random.uniform(0.985, 0.994)]), 4)
-    v_speed = f"setpts=PTS/{speed}"
+    v_filter = (
+        "[0:v]split=2[main][first];"
+        "[first]trim=end_frame=1,boxblur=15:5,loop=loop=7:size=1:start=0,setpts=N/30/TB[intro];"
+        "[intro][main]concat=n=2:v=1:a=0[v_cat];"
+        f"[v_cat]rotate={rot_angle}:ow='rotw({rot_angle})':oh='roth({rot_angle})',"
+        "crop=trunc((in_w-8)/2)*2:trunc((in_h-8)/2)*2,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,"
+        f"vignette=angle={vignette_angle},"
+        f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma},"
+        f"noise=c0s={noise_luma}:c0f=t+u:c1s={noise_chroma}:c1f=t,"
+        "unsharp=3:3:0.25[v_out]"
+    )
 
-    # Composite video filter chain
-    vf = f"{crop_filter},{vignette_filter},{eq_filter},{noise_filter},{unsharp_filter},{v_speed}"
-
-    # 6. Audio Pitch & Parametric EQ Shift (defeats Audible Magic / Meta Rights Manager acoustic fingerprints)
-    pitch_factor = round(random.choice([random.uniform(1.025, 1.038), random.uniform(0.965, 0.978)]), 4)
     low_freq = random.randint(115, 135)
     low_gain = round(random.uniform(1.5, 2.2), 2)
     high_freq = random.randint(3200, 3600)
     high_gain = round(random.uniform(-1.5, -2.2), 2)
-    eq_audio = f"equalizer=f={low_freq}:t=q:w=1:g={low_gain},equalizer=f={high_freq}:t=q:w=1:g={high_gain}"
-
     vol_scale = round(random.uniform(0.995, 1.008), 3)
-    af = (
-        f"aformat=sample_rates=44100:channel_layouts=stereo,"
-        f"asetrate=44100*{pitch_factor},"
-        f"aresample=44100,"
-        f"atempo=1/{pitch_factor},"
-        f"{eq_audio},"
-        f"atempo={speed},"
-        f"volume={vol_scale}"
-    )
+
+    if has_audio:
+        a_filter = (
+            "[0:a]adelay=233|233,"
+            "flanger=delay=1.2:depth=0.4:speed=0.2,"
+            f"equalizer=f={low_freq}:t=q:w=1:g={low_gain},"
+            f"equalizer=f={high_freq}:t=q:w=1:g={high_gain},"
+            f"volume={vol_scale}[a_out]"
+        )
+        filter_complex = f"{v_filter};{a_filter}"
+    else:
+        filter_complex = v_filter
 
     audio_bitrate = random.choice(["128k", "132k", "125k", "130k"])
     crf_val = str(random.choice([21, 22]))
@@ -335,19 +354,19 @@ def _get_random_anti_detect_params() -> dict:
         "-metadata", f"encoder={profile['encoder']}",
         "-metadata:s:v:0", f"creation_time={iso_time}",
         "-metadata:s:v:0", f"handler_name={profile['video_handler']}",
-        "-metadata:s:a:0", f"creation_time={iso_time}",
-        "-metadata:s:a:0", f"handler_name={profile['audio_handler']}",
     ]
+    if has_audio:
+        metadata_args.extend([
+            "-metadata:s:a:0", f"creation_time={iso_time}",
+            "-metadata:s:a:0", f"handler_name={profile['audio_handler']}",
+        ])
 
     return {
         "profile": profile["name"],
         "iso_time": iso_time,
-        "speed": speed,
-        "pitch": pitch_factor,
-        "crop_ratio": crop_ratio,
-        "saturation": saturation,
-        "vf": vf,
-        "af": af,
+        "rot_angle": rot_angle,
+        "has_audio": has_audio,
+        "filter_complex": filter_complex,
         "audio_bitrate": audio_bitrate,
         "crf": crf_val,
         "metadata_args": metadata_args,
@@ -356,31 +375,27 @@ def _get_random_anti_detect_params() -> dict:
 
 def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
     """
-    Advanced Anti-Detection & Unique Metadata Injection (Render 512MB RAM safe):
+    Elite Anti-Detection & Unique Device Profile Injection (Render 512MB RAM safe):
     1. Wipes ALL original tracking metadata (-map_metadata -1).
-    2. Injects a randomized realistic device profile (iPhone, Samsung, Pixel, Premiere Pro, etc.)
-       with randomized creation time, camera tags, and encoder strings unique to every video.
-    3. Breaks spatial hashing & SSCD via real 4%-6% spatial crop + Lanczos re-scaling.
-    4. Breaks quadrant luminance vectors via subtle corner vignette.
-    5. Conceals/masks pixel marks & DCT blockhashes via dynamic temporal noise + enhanced saturation (+6-8%).
-    6. Breaks Audible Magic & Meta Rights Manager via acoustic pitch shift + dual-band parametric EQ.
-    7. Breaks temporal cut matching via micro-speed shift (1.01x) on video & audio.
-    8. Sets standard mobile camera BT.709 color primaries.
-    9. Strictly limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
-    10. Fast fallback to stream copy with randomized metadata if re-encoding times out or exceeds 35MB.
+    2. Overwrites Keyframe 0 with a 0.23s cinematic focus-pull intro.
+    3. Coordinate micro-rotation + auto-crop + even dimensions.
+    4. Dynamic vignette, temporal noise, and micro-color grading.
+    5. Acoustic flanger, dual-band parametric EQ, and 233ms sync delay.
+    6. Fixed GOP 30 cadence with 2 B-frames.
+    7. Injects realistic randomized device profile headers.
+    8. Strictly limits ffmpeg to 2 worker threads (-threads 2) to eliminate cloud RAM spikes.
     """
     if not shutil.which("ffmpeg"):
         logger.warning("ffmpeg not found - skipping video protection.")
         return False
 
-    params = _get_random_anti_detect_params()
+    has_audio = _has_audio_stream(input_path)
+    params = _get_random_anti_detect_params(has_audio=has_audio)
     logger.info(
-        "Applying ultra anti-detection profile '%s' (crop=%.1f%%, sat=+%.1f%%, pitch=%.4fx, speed=%.4fx): %s",
+        "Applying elite anti-detection profile '%s' (rot=%.4frad, audio=%s): %s",
         params["profile"],
-        (1.0 - params["crop_ratio"]) * 100,
-        (params["saturation"] - 1.0) * 100,
-        params["pitch"],
-        params["speed"],
+        params["rot_angle"],
+        has_audio,
         output_path.name,
     )
 
@@ -411,22 +426,29 @@ def _strip_and_protect_video(input_path: Path, output_path: Path) -> bool:
         "-threads", "2",
         "-i", str(input_path),
         "-map_metadata", "-1",  # wipe all original container metadata
-        "-vf", params["vf"],
-        "-af", params["af"],
+        "-filter_complex", params["filter_complex"],
+        "-map", "[v_out]",
+    ]
+    if has_audio:
+        cmd_advanced.extend([
+            "-map", "[a_out]",
+            "-c:a", "aac", "-b:a", params["audio_bitrate"],
+        ])
+    cmd_advanced.extend([
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", params["crf"],
+        "-g", "30", "-bf", "2",
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
-        "-c:a", "aac", "-b:a", params["audio_bitrate"],
         *params["metadata_args"],
         "-movflags", "+faststart",
         str(output_path),
-    ]
+    ])
 
     try:
         result = subprocess.run(cmd_advanced, capture_output=True, text=True, timeout=60)
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
             out_mb = output_path.stat().st_size / (1024 * 1024)
             if out_mb <= 48:
-                logger.info("Advanced video protection (%s) successful: %s (%.1f MB)", params["profile"], output_path.name, out_mb)
+                logger.info("Elite video protection (%s) successful: %s (%.1f MB)", params["profile"], output_path.name, out_mb)
                 return True
             logger.warning("Protected video is too large for Telegram (%.1f MB), falling back to fast copy", out_mb)
         else:
@@ -560,12 +582,17 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
 
     is_reel_url = bool(re.search(r"instagram\.com/(?:reel|reels)/", url, re.I))
 
-    endpoints = [
-        f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
-        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-        f"https://www.instagram.com/reel/{shortcode}/embed/",
-        f"https://www.instagram.com/p/{shortcode}/embed/",
-    ]
+    # Fast route: Only probe matching endpoint type with tight timeouts to prevent datacenter stalls
+    if is_reel_url:
+        endpoints = [
+            (f"https://www.instagram.com/reel/{shortcode}/embed/captioned/", 5),
+            (f"https://www.instagram.com/reel/{shortcode}/embed/", 4),
+        ]
+    else:
+        endpoints = [
+            (f"https://www.instagram.com/p/{shortcode}/embed/captioned/", 5),
+            (f"https://www.instagram.com/p/{shortcode}/embed/", 4),
+        ]
 
     headers = {
         "User-Agent": (
@@ -589,9 +616,9 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
         "button",
     ]
 
-    for endpoint in endpoints:
+    for endpoint, ep_timeout in endpoints:
         try:
-            r = cffi_requests.get(endpoint, headers=headers, impersonate="chrome124", timeout=12)
+            r = cffi_requests.get(endpoint, headers=headers, impersonate="chrome124", timeout=ep_timeout)
             if r.status_code != 200 or len(r.text) < 1000:
                 continue
 
@@ -643,7 +670,7 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
             # Download and protect video if found
             if v_url:
                 raw_video = work_dir / "raw_media.mp4"
-                v_resp = cffi_requests.get(v_url, impersonate="chrome124", timeout=35)
+                v_resp = cffi_requests.get(v_url, impersonate="chrome124", timeout=18)
                 if v_resp.status_code == 200 and len(v_resp.content) > 10000:
                     raw_video.write_bytes(v_resp.content)
 
@@ -671,7 +698,7 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
                     continue
                 # Real user post photos must be from scontent
                 if "scontent" in img_url or "instagram.f" in img_url or "fbcdn.net" in img_url:
-                    img_resp = cffi_requests.get(img_url, impersonate="chrome124", timeout=20)
+                    img_resp = cffi_requests.get(img_url, impersonate="chrome124", timeout=12)
                     if img_resp.status_code == 200 and len(img_resp.content) > 15000:  # Real photo is > 15KB
                         raw_img = work_dir / "media.jpg"
                         raw_img.write_bytes(img_resp.content)

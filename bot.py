@@ -818,21 +818,48 @@ async def animate_progress(status_msg, stop_event: asyncio.Event) -> None:
     """
     Lightweight animated progress ticker with premium custom emojis.
     Zero extra RAM, strictly respects Telegram rate limits (1.2s - 2.0s intervals).
+    Continuously animates and pulses so it never gets stuck at 85%.
     """
-    frames = [
-        (f"{E_LIGHTNING} <b>Connecting to Instagram...</b>\n<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n<i>Initializing secure stream...</i>", 1.2),
+    initial_frames = [
+        (f"{E_LIGHTNING} <b>Connecting to Stream...</b>\n<code>[▰▱▱▱▱▱▱▱▱▱] 15%</code>\n<i>Initializing secure stream...</i>", 1.2),
         (f"{E_RING_LOADER} <b>Fetching Media Data...</b>\n<code>[▰▰▰▱▱▱▱▱▱▱] 35%</code>\n<i>Resolving highest quality source...</i>", 1.5),
-        (f"{E_NEON_RINGS} <b>Downloading Media...</b>\n<code>[▰▰▰▰▰▰▱▱▱▱] 65%</code>\n<i>Bypassing restrictions...</i>", 1.8),
-        (f"{E_DARK_SHADOW} <b>Processing & Cleaning Metadata...</b>\n<code>[▰▰▰▰▰▰▰▰▱▱] 85%</code>\n<i>Stripping tracking info for safety...</i>", 2.0),
+        (f"{E_NEON_RINGS} <b>Downloading Media Chunks...</b>\n<code>[▰▰▰▰▰▰▱▱▱▱] 65%</code>\n<i>Bypassing platform restrictions...</i>", 1.8),
+        (f"{E_DARK_SHADOW} <b>Applying Anti-Detection Engine...</b>\n<code>[▰▰▰▰▰▰▰▰▱▱] 85%</code>\n<i>Injecting device profile & focus-pull...</i>", 2.0),
+        (f"{E_COLOR_DOTS} <b>Rendering Clean Media...</b>\n<code>[▰▰▰▰▰▰▰▰▰▱] 92%</code>\n<i>Applying audio flanger & color grading...</i>", 2.0),
+        (f"{E_SPARKLES} <b>Finalizing Container...</b>\n<code>[▰▰▰▰▰▰▰▰▰▰] 98%</code>\n<i>Optimizing faststart streaming headers...</i>", 2.0),
     ]
-    for text, delay in frames:
+    for text, delay in initial_frames:
         try:
             if stop_event.is_set():
-                break
+                return
             await asyncio.sleep(delay)
             if stop_event.is_set():
-                break
+                return
             await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
+        except (TelegramError, Exception):
+            pass
+
+    # Dynamic pulsing loop while waiting for final FFmpeg encode / Telegram dispatch
+    pulse_subtitles = [
+        "Preparing media package for upload... 🚀",
+        "Encoding high-speed stream... ⚡",
+        "Polishing audio-video sync... ✨",
+        "Almost ready to deliver... 📦",
+    ]
+    idx = 0
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(2.0)
+            if stop_event.is_set():
+                break
+            sub = pulse_subtitles[idx % len(pulse_subtitles)]
+            idx += 1
+            pulse_text = (
+                f"{E_ROCKET} <b>Processing Complete — Packaging...</b>\n"
+                f"<code>[▰▰▰▰▰▰▰▰▰▰] 99%</code>\n"
+                f"<i>{sub}</i>"
+            )
+            await status_msg.edit_text(pulse_text, parse_mode=ParseMode.HTML)
         except (TelegramError, Exception):
             pass
 

@@ -209,59 +209,60 @@ def _migrate_from_sqlite() -> None:
         sq_conn = sqlite3.connect(str(DB_PATH))
         sq_cur = sq_conn.cursor()
 
-        with get_db_cursor() as pg_cur:
-            # Users
-            try:
-                sq_cur.execute("SELECT user_id, username, first_name, joined_at FROM users")
-                for r in sq_cur.fetchall():
-                    pg_cur.execute("""
-                        INSERT INTO users (user_id, username, first_name, joined_at)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (user_id) DO NOTHING
-                    """, r)
-            except Exception:
-                pass
+        # Users
+        try:
+            sq_cur.execute("SELECT user_id, username, first_name, joined_at FROM users")
+            rows = sq_cur.fetchall()
+            if rows:
+                with get_db_cursor() as pg_cur:
+                    for r in rows:
+                        pg_cur.execute("""
+                            INSERT INTO users (user_id, username, first_name, joined_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (user_id) DO NOTHING
+                        """, r)
+        except Exception as e_u:
+            logger.debug("Users migration notice: %s", e_u)
 
-            # Channels
-            try:
-                sq_cur.execute("SELECT chat_id, title, invite_link FROM channels")
-                for r in sq_cur.fetchall():
-                    pg_cur.execute("""
-                        INSERT INTO channels (chat_id, title, invite_link)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (chat_id) DO NOTHING
-                    """, r)
-            except Exception:
-                pass
+        # Channels
+        try:
+            sq_cur.execute("SELECT chat_id, title, invite_link FROM channels")
+            rows = sq_cur.fetchall()
+            if rows:
+                with get_db_cursor() as pg_cur:
+                    for r in rows:
+                        pg_cur.execute("""
+                            INSERT INTO channels (chat_id, title, invite_link)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (chat_id) DO NOTHING
+                        """, r)
+        except Exception as e_c:
+            logger.debug("Channels migration notice: %s", e_c)
 
-            # Settings
-            try:
-                sq_cur.execute("SELECT key, value FROM settings")
-                for r in sq_cur.fetchall():
-                    pg_cur.execute("""
-                        INSERT INTO settings (key, value)
-                        VALUES (%s, %s)
-                        ON CONFLICT (key) DO NOTHING
-                    """, r)
-            except Exception:
-                pass
+        # Settings
+        try:
+            sq_cur.execute("SELECT key, value FROM settings")
+            rows = sq_cur.fetchall()
+            if rows:
+                with get_db_cursor() as pg_cur:
+                    for r in rows:
+                        pg_cur.execute("""
+                            INSERT INTO settings (key, value)
+                            VALUES (%s, %s)
+                            ON CONFLICT (key) DO NOTHING
+                        """, r)
+        except Exception as e_s:
+            logger.debug("Settings migration notice: %s", e_s)
 
-            # Downloads
-            try:
-                sq_cur.execute("SELECT user_id, url, success, ts FROM downloads")
-                for r in sq_cur.fetchall():
-                    pg_cur.execute("""
-                        INSERT INTO downloads (user_id, url, success, ts)
-                        VALUES (%s, %s, %s, %s)
-                    """, r)
-            except Exception:
-                pass
-
-            # Mark migration complete
-            pg_cur.execute("INSERT INTO settings (key, value) VALUES ('sqlite_migrated', '1') ON CONFLICT (key) DO NOTHING")
+        # Mark migration complete
+        try:
+            with get_db_cursor() as pg_cur:
+                pg_cur.execute("INSERT INTO settings (key, value) VALUES ('sqlite_migrated', '1') ON CONFLICT (key) DO NOTHING")
+        except Exception:
+            pass
 
         sq_conn.close()
-        logger.info("Successfully migrated existing SQLite data to PostgreSQL / Neon!")
+        logger.info("Successfully checked/migrated SQLite data to PostgreSQL / Neon!")
     except Exception as exc:
         logger.warning("Error during SQLite migration: %s", exc)
 
