@@ -302,19 +302,21 @@ def _get_random_anti_detect_params(has_audio: bool = True) -> dict:
     iso_time = creation_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rot_angle = round(random.choice([0.012, -0.012]), 4)
-    vignette_angle = round(random.uniform(0.33, 0.38), 3)
+    vignette_angle = round(random.uniform(0.38, 0.44), 3)
 
-    contrast = round(random.uniform(1.025, 1.045), 3)
-    brightness = round(random.uniform(0.003, 0.007), 4)
-    saturation = round(random.uniform(1.055, 1.085), 3)
-    gamma = round(random.uniform(0.995, 1.005), 3)
+    # Strong cinematic color grading: rich saturation + deep crushed blacks/shadows
+    contrast = round(random.uniform(1.15, 1.22), 3)
+    brightness = round(random.uniform(-0.045, -0.030), 4)
+    saturation = round(random.uniform(1.30, 1.40), 3)
+    gamma = round(random.uniform(0.90, 0.94), 3)
 
     noise_luma = random.choice([3, 4])
     noise_chroma = random.choice([2, 3])
 
+    # 0.5 second (15 frames @ 30fps) visible freeze intro + strong color grading
     v_filter = (
         "[0:v]split=2[main][first];"
-        "[first]trim=end_frame=1,boxblur=15:5,loop=loop=7:size=1:start=0,setpts=N/30/TB[intro];"
+        "[first]trim=end_frame=1,boxblur=15:5,loop=loop=15:size=1:start=0,setpts=N/30/TB[intro];"
         "[intro][main]concat=n=2:v=1:a=0[v_cat];"
         f"[v_cat]rotate={rot_angle}:ow='rotw({rot_angle})':oh='roth({rot_angle})',"
         "crop=trunc((in_w-8)/2)*2:trunc((in_h-8)/2)*2,"
@@ -322,18 +324,19 @@ def _get_random_anti_detect_params(has_audio: bool = True) -> dict:
         f"vignette=angle={vignette_angle},"
         f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}:gamma={gamma},"
         f"noise=c0s={noise_luma}:c0f=t+u:c1s={noise_chroma}:c1f=t,"
-        "unsharp=3:3:0.25[v_out]"
+        "unsharp=3:3:0.40[v_out]"
     )
 
     low_freq = random.randint(115, 135)
-    low_gain = round(random.uniform(1.5, 2.2), 2)
+    low_gain = round(random.uniform(1.8, 2.4), 2)
     high_freq = random.randint(3200, 3600)
-    high_gain = round(random.uniform(-1.5, -2.2), 2)
+    high_gain = round(random.uniform(-1.8, -2.4), 2)
     vol_scale = round(random.uniform(0.995, 1.008), 3)
 
     if has_audio:
+        # 500ms delay perfectly aligns with 0.5s (15 frames) intro freeze
         a_filter = (
-            "[0:a]adelay=233|233,"
+            "[0:a]adelay=500|500,"
             "flanger=delay=1.2:depth=0.4:speed=0.2,"
             f"equalizer=f={low_freq}:t=q:w=1:g={low_gain},"
             f"equalizer=f={high_freq}:t=q:w=1:g={high_gain},"

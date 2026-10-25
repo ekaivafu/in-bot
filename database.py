@@ -28,7 +28,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NEON_URL = "postgresql://neondb_owner:npg_sQ2qmY8EkLVr@ep-falling-cherry-b3o7kk49-pooler.c-4.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL or "ep-jolly-dust" in DATABASE_URL:
+    DATABASE_URL = DEFAULT_NEON_URL
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
