@@ -77,6 +77,7 @@ from downloader import (
     extract_shortcode,
     extract_audio_from_video,
     check_cookies_health,
+    find_cookies_file,
     DOWNLOAD_DIR,
 )
 import html
@@ -399,14 +400,15 @@ def kb_cancel() -> InlineKeyboardMarkup:
 def rkb_admin() -> ReplyKeyboardMarkup:
     """Persistent bottom keyboard for the admin."""
     maint_label = "🔧 Maintenance: ON" if is_maintenance() else "🔧 Maintenance: OFF"
-    engine_label = "⚡ Engine: Cookie-Free 🚀"
+    has_cookies = bool(find_cookies_file())
+    cookie_label = "🍪 Cookies: Active ✅" if has_cookies else "🍪 Cookies: Upload 📄"
     chan_count = get_channel_count()
     chan_label = f"📺 Channels ({chan_count})"
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(BTN_STATS),       KeyboardButton(BTN_BROADCAST)],
             [KeyboardButton(maint_label),     KeyboardButton(chan_label)],
-            [KeyboardButton(engine_label),    KeyboardButton(BTN_CLOSE_MENU)],
+            [KeyboardButton(cookie_label),    KeyboardButton(BTN_CLOSE_MENU)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin mode active...",
@@ -1240,6 +1242,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
 
+    # ── Admin cookie text paste ───────────────────────────────────────────
+    if text and is_admin(user.id) and (text.strip().startswith("# Netscape HTTP Cookie File") or (text.strip().startswith("[") and "instagram.com" in text)):
+        try:
+            target_path = Path("cookies.txt")
+            if text.strip().startswith("["):
+                temp_json = Path("temp_cookies.json")
+                temp_json.write_text(text.strip(), encoding="utf-8")
+                ok = convert_json_cookies_to_netscape(temp_json, target_path)
+                temp_json.unlink(missing_ok=True)
+                if not ok:
+                    await message.reply_text(f"{E_WARNING} <b>Failed to parse JSON cookies format.</b>", parse_mode=ParseMode.HTML)
+                    return
+            else:
+                target_path.write_text(text.strip(), encoding="utf-8")
+
+            cookie_content = target_path.read_text(encoding="utf-8")
+            set_setting("active_cookies", cookie_content)
+            await message.reply_text(
+                f"{E_CONFETTI} <b>Cookies Updated Successfully!</b>\n\n"
+                f"{E_CHECK_MARK} Saved fresh <code>cookies.txt</code> ({len(cookie_content):,} bytes)\n"
+                f"{E_DIAMOND} Backed up to Neon PostgreSQL\n"
+                f"{E_LIGHTNING} Authenticated yt-dlp fallback is active!",
+                parse_mode=ParseMode.HTML,
+                reply_markup=rkb_admin(),
+            )
+            return
+        except Exception as e:
+            logger.exception("Failed to save pasted cookies: %s", e)
+            await message.reply_text(f"{E_WARNING} <b>Error saving cookies:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
+            return
+
     # ── Admin cookie document upload ───────────────────────────────────────
     if message and message.document and is_admin(user.id):
         doc = message.document
@@ -1449,13 +1482,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         f"{E_BLACK_MASK} <b>Private Account</b>\n\n"
                         f"This post is from a private account on {platform_name}.\n"
                         "I can only download from public accounts.",
-                        parse_mode=ParseMode.HTML,
-                    )
-                elif err_type == "restricted":
-                    await status_msg.edit_text(
-                        f"{E_BLACK_MASK} <b>Audience Restricted</b>\n\n"
-                        f"This {platform_name} post or reel has age or audience restrictions set by the creator.\n"
-                        "It cannot be accessed without an authenticated, age-verified account.",
                         parse_mode=ParseMode.HTML,
                     )
                 elif err_type == "not_found":
@@ -1756,13 +1782,19 @@ async def _handle_button(text: str, user, message, context: ContextTypes.DEFAULT
             disable_web_page_preview=True,
         )
 
-    elif text.startswith("⚡ Engine:") or text.startswith("🍪 Cookie:"):
+    elif text.startswith("⚡ Engine:") or text.startswith("🍪 Cookie:") or text.startswith("🍪 Cookies:"):
+        has_cookies = bool(find_cookies_file())
+        cookie_file = find_cookies_file()
+        size_str = f"({Path(cookie_file).stat().st_size:,} bytes)" if has_cookies and Path(cookie_file).exists() else ""
+        c_status = f"🟢 <b>Active</b> {size_str}" if has_cookies else "⚪ <b>Not Configured</b>"
         await message.reply_text(
-            f"🚀 <b>Download Engine: 100% Cookie-Free Active!</b>\n\n"
-            f"• <b>Primary:</b> High-speed direct Meta CDN Embed Extractor\n"
-            f"• <b>Fallback:</b> Anonymous yt-dlp Extractor\n"
-            f"• <b>Status:</b> 🟢 Active & Ready\n"
-            f"• <b>Accounts/Cookies:</b> None required (Zero login walls / Zero auto-maintenance)",
+            f"🍪 <b>Cookie & Download Pipeline Status</b>\n\n"
+            f"• <b>Cookie Status:</b> {c_status}\n"
+            f"• <b>Tier 1:</b> Instant direct Meta CDN & Polaris engine\n"
+            f"• <b>Tier 2:</b> Anonymous yt-dlp public extractor\n"
+            f"• <b>Tier 3:</b> Authenticated yt-dlp via cookies (for login-walled/restricted reels)\n\n"
+            f"<b>How to update cookies:</b>\n"
+            f"Simply send your <code>cookies.txt</code> or exported <code>.json</code> file to this chat anytime.",
             parse_mode=ParseMode.HTML,
             reply_markup=rkb_admin(),
         )
@@ -2176,7 +2208,18 @@ async def post_init(application: Application) -> None:
     set_setting("maintenance_mode", "0")
     set_setting("cookie_alert_active", "0")
     stop_cookie_reminder(application.job_queue)
-    logger.info("Operating in 100% cookie-free public engine mode (maintenance OFF)")
+
+    # Restore cookies from database if cookies.txt is missing on Render ephemeral filesystem
+    try:
+        saved_cookies = get_setting("active_cookies", "")
+        c_path = Path("cookies.txt")
+        if saved_cookies and saved_cookies.strip() and (not c_path.exists() or c_path.stat().st_size == 0):
+            c_path.write_text(saved_cookies.strip(), encoding="utf-8")
+            logger.info("Restored cookies.txt from database backup (%d bytes)", len(saved_cookies))
+    except Exception as exc:
+        logger.warning("Could not restore cookies from database: %s", exc)
+
+    logger.info("Engine ready. Cookie status: %s", "Active" if find_cookies_file() else "None (public mode)")
 
 
 # ── Health Check Server (Render Web Service Port Binding) ──────────────────────

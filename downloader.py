@@ -948,9 +948,9 @@ def download_instagram(url: str) -> dict:
         result["raw_error"] = err_msg
         logger.debug("Anonymous yt-dlp download failed: %s", exc_anon)
 
-        if any(w in err_lower for w in ("audience", "available to everyone", "age", "certain audiences", "restricted", "sensitive")):
-            result["error_type"] = "restricted"
-            result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
+        if any(w in err_lower for w in ("audience", "available to everyone", "age", "certain audiences", "restricted", "sensitive", "login")):
+            result["error_type"] = "cookie_needed"
+            result["error"] = "This post requires cookies or login."
         elif "private" in err_lower and "rate" not in err_lower:
             result["error_type"] = "private"
             result["error"] = "This account or post is *private*."
@@ -958,7 +958,7 @@ def download_instagram(url: str) -> dict:
             result["error_type"] = "not_found"
             result["error"] = "This post or reel was deleted or is no longer available on Instagram."
 
-    # ── Tier 3: Authenticated yt-dlp Fallback (if cookies are configured on host) ──
+    # ── Tier 3: Authenticated yt-dlp Fallback (Cookie System) ──
     cookies_path = find_cookies_file()
     if cookies_path:
         try:
@@ -968,17 +968,14 @@ def download_instagram(url: str) -> dict:
                 info_auth = ydl_auth.extract_info(url, download=True)
 
             if info_auth and _extract_media_result(work_dir, info_auth, result):
-                logger.info("Authenticated yt-dlp download succeeded!")
+                logger.info("Authenticated yt-dlp download succeeded via cookies!")
                 return result
         except Exception as exc_auth:
             err_msg = str(exc_auth)
             err_lower = err_msg.lower()
             result["raw_error"] = err_msg
 
-            if any(w in err_lower for w in ("audience", "available to everyone", "age", "certain audiences", "restricted", "sensitive")):
-                result["error_type"] = "restricted"
-                result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
-            elif any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
+            if any(w in err_lower for w in ("not found", "unavailable", "does not exist", "removed")):
                 result["error_type"] = "not_found"
                 result["error"] = "This post or reel was deleted or is no longer available on Instagram."
             elif "private" in err_lower and "rate" not in err_lower:
@@ -989,14 +986,14 @@ def download_instagram(url: str) -> dict:
                 result["error"] = "Download failed. Please ensure the link is a valid public reel."
 
             logger.warning("Authenticated yt-dlp fallback failed | type=%s | error=%s", result["error_type"], err_msg)
+    else:
+        logger.info("No cookies.txt available for authenticated fallback.")
 
     # If all tiers failed, return user-friendly error
     if not result.get("error"):
-        if result.get("error_type") == "restricted":
-            result["error"] = "This post or reel has age or audience restrictions set by the creator on Instagram."
-        elif "/reel/" in url.lower() or "/reels/" in url.lower():
+        if "/reel/" in url.lower() or "/reels/" in url.lower():
             result["error_type"] = result.get("error_type") or "not_found"
-            result["error"] = "Could not retrieve this reel. It may be age-restricted, login-protected, or removed."
+            result["error"] = "Could not retrieve this reel. Please verify that the link is valid."
         else:
             result["error_type"] = result.get("error_type") or "generic"
             result["error"] = "Download failed. Please ensure the link is a valid public reel or post."
@@ -1305,10 +1302,10 @@ def extract_audio_from_video(video_path: Path, output_audio_path: Path | None = 
 
 
 def check_cookies_health() -> tuple[bool, str]:
-    """
-    Cookie-free engine status.
-    Instagram downloads are 100% cookie-free via public Meta CDN embed stream extraction.
-    """
-    return True, "100% Cookie-free public engine active"
+    """Check if cookies are present and available for authenticated fallback."""
+    cf = find_cookies_file()
+    if cf and Path(cf).exists() and Path(cf).stat().st_size > 50:
+        return True, f"Cookies active ({Path(cf).stat().st_size:,} bytes)"
+    return False, "Operating in cookie-free public mode"
 
 
