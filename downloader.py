@@ -122,13 +122,12 @@ def find_cookies_file() -> str | None:
 
 # ── Regex to validate Instagram & TikTok URLs ───────────────────────────────
 INSTAGRAM_URL_RE = re.compile(
-    r"(https?://)?(www\.)?instagram\.com"
-    r"/(p|reel|tv|stories)/[\w\-]+",
+    r"(https?://)?([a-zA-Z0-9-]+\.)?instagram\.com/(?:p|reel|reels|tv|stories)/[\w\-]+",
     re.IGNORECASE,
 )
 
 TIKTOK_URL_RE = re.compile(
-    r"(https?://)?([a-zA-Z0-9-]+\.)?tiktok\.com/(@[\w.-]+/video/\d+|v/\d+|t/[\w-]+|[\w.-]+)",
+    r"(https?://)?([a-zA-Z0-9-]+\.)?tiktok\.com/(?:@[\w.-]+/(?:video|photo)/\d+|v/\d+|t/[\w-]+|[\w.-]+(?:/[\w.-]+)*)",
     re.IGNORECASE,
 )
 
@@ -251,19 +250,6 @@ DEVICE_PROFILES = [
     },
 ]
 
-
-def _get_random_anti_detect_params() -> dict:
-    """
-    Generates 100% unique, randomized metadata and perceptual transforms
-    for EVERY processed video to defeat Meta/Instagram and TikTok originality detection:
-    - Real 4%-6% spatial crop + Lanczos dynamic zoom (defeats spatial grid & SSCD representation matching)
-    - Subtle corner vignette (shifts radial luminance distribution across quadrant vectors)
-    - Enhanced saturation (+5.5% to +8.5%) & micro-contrast (masks compression artifacts & pixel marks)
-    - Dynamic temporal grain/noise on luma & chroma (conceals DCT 8x8 block-matching & pixel marks)
-    - Acoustic audio pitch shift (±0.5 semitone) & dual-band parametric EQ (defeats Audible Magic & Meta Rights Manager)
-    - Micro temporal speed jitter (1-1.5%) shifting cuts and motion vectors
-    - Full container metadata strip + randomized real camera device profile injection
-    """
 def _has_audio_stream(video_path: Path) -> bool:
     """Check if the video has an audio stream via ffprobe."""
     if not shutil.which("ffprobe"):
@@ -692,25 +678,40 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
             if is_reel_url:
                 continue
 
-            # Strategy D: Real user photo (ONLY for photo posts /p/, NEVER for reels)
+            # Strategy D: Real user photos / carousel (ONLY for photo posts /p/, NEVER for reels)
             img_matches = re.findall(r'https:[^"\'<>\s]+?\.(?:jpg|jpeg|webp)[^"\'<>\s]*', r.text)
+            seen_cand = set()
+            cand_urls = []
             for m in img_matches:
                 img_url = m.replace(r"\/", "/").replace(r"\u0026", "&").replace("&amp;", "&").replace("\\", "")
-                # Strictly reject static UI assets, logos, and badges
                 if any(bad in img_url.lower() for bad in BAD_IMAGE_PATTERNS):
                     continue
-                # Real user post photos must be from scontent
-                if "scontent" in img_url or "instagram.f" in img_url or "fbcdn.net" in img_url:
-                    img_resp = cffi_requests.get(img_url, impersonate="chrome124", timeout=12)
-                    if img_resp.status_code == 200 and len(img_resp.content) > 15000:  # Real photo is > 15KB
-                        raw_img = work_dir / "media.jpg"
-                        raw_img.write_bytes(img_resp.content)
-                        result["success"] = True
-                        result["image_paths"] = [raw_img]
-                        result["caption"] = caption
-                        result["is_video"] = False
-                        logger.info("Direct cookie-free embed image download succeeded: %s", shortcode)
-                        return True
+                if ("scontent" in img_url or "instagram.f" in img_url or "fbcdn.net" in img_url) and "150x150" not in img_url:
+                    base_key = img_url.split("?")[0]
+                    if base_key not in seen_cand:
+                        seen_cand.add(base_key)
+                        cand_urls.append(img_url)
+
+            if cand_urls:
+                downloaded_images = []
+                for idx, c_url in enumerate(cand_urls[:10]):
+                    try:
+                        img_resp = cffi_requests.get(c_url, impersonate="chrome124", timeout=12)
+                        if img_resp.status_code == 200 and len(img_resp.content) > 15000:
+                            img_path = work_dir / f"slide_{idx+1}.jpg" if len(cand_urls) > 1 else work_dir / "media.jpg"
+                            img_path.write_bytes(img_resp.content)
+                            downloaded_images.append(img_path)
+                    except Exception as e:
+                        logger.debug("Failed downloading embed slide %d: %s", idx, e)
+
+                if downloaded_images:
+                    result["success"] = True
+                    result["image_paths"] = downloaded_images
+                    result["media_items"] = [{"type": "photo", "path": p} for p in downloaded_images]
+                    result["caption"] = caption
+                    result["is_video"] = False
+                    logger.info("Direct cookie-free embed image(s) succeeded: %s (%d photos)", shortcode, len(downloaded_images))
+                    return True
 
         except Exception as exc:
             logger.debug("Direct embed extractor error on %s: %s", endpoint, exc)
@@ -718,31 +719,207 @@ def download_via_direct_embed(url: str, work_dir: Path, result: dict) -> bool:
     return False
 
 
+def shortcode_to_media_id(shortcode: str) -> int:
+    """Convert Instagram Base64 shortcode to numeric media ID."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    media_id = 0
+    for char in shortcode:
+        if char in alphabet:
+            media_id = (media_id * 64) + alphabet.index(char)
+    return media_id
+
+
+def download_instagram_polaris(shortcode: str, work_dir: Path, result: dict) -> bool:
+    """
+    Direct public extraction via Instagram's Polaris Desktop GraphQL API.
+    Zero login, zero cookies, zero external paid dependencies.
+    Extracts Single Photos, Multi-Photo Carousels, and Videos/Reels with 100% fidelity.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        session = cffi_requests.Session(impersonate="chrome124")
+        base_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        r_home = session.get("https://www.instagram.com/", headers=base_headers, timeout=12)
+        lsd_match = re.search(r'["\']LSD["\'],\[\],\{["\']token["\']:["\']([^"\']+)["\']\}', r_home.text)
+        if not lsd_match:
+            lsd_match = re.search(r'name=["\']lsd["\']\s+value=["\']([^"\']+)["\']', r_home.text)
+        lsd_token = lsd_match.group(1) if lsd_match else ""
+        csrf_token = session.cookies.get("csrftoken") or ""
+
+        media_id = shortcode_to_media_id(shortcode)
+        if not media_id:
+            return False
+
+        gql_headers = {
+            "User-Agent": base_headers["User-Agent"],
+            "X-IG-App-ID": "936619743392459",
+            "X-ASBD-ID": "129477",
+            "X-FB-Friendly-Name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+            "X-CSRFToken": csrf_token,
+            "X-FB-LSD": lsd_token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"https://www.instagram.com/p/{shortcode}/",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        payload = {
+            "lsd": lsd_token,
+            "fb_api_caller_class": "RelayModern",
+            "fb_api_req_friendly_name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+            "server_timestamps": "true",
+            "variables": json.dumps({"media_id": str(media_id)}, separators=(",", ":")),
+            "doc_id": "27130156389949648",
+        }
+
+        r_gql = session.post("https://www.instagram.com/api/graphql", data=payload, headers=gql_headers, timeout=15)
+        if r_gql.status_code != 200 or not r_gql.text:
+            return False
+
+        data = r_gql.json()
+        polaris_media = (data.get("data") or {}).get("xig_polaris_media") or {}
+        prod = polaris_media.get("if_not_gated_logged_out")
+        if not prod:
+            logger.debug("Polaris post %s gated or unavailable", shortcode)
+            return False
+
+        uploader = prod.get("user", {}).get("username") or ""
+        raw_cap = prod.get("caption", {}).get("text", "") if prod.get("caption") else ""
+        cleaned_cap, _ = clean_instagram_caption(raw_cap, uploader)
+
+        result["author"] = uploader
+        result["caption"] = cleaned_cap
+        result["shortcode"] = shortcode
+
+        carousel = prod.get("carousel_media") or []
+        if carousel:
+            # ── Multi-Slide Carousel (Photos and/or Videos) ──
+            downloaded_images = []
+            downloaded_videos = []
+            media_items = []
+
+            for idx, item in enumerate(carousel[:10]):
+                vids = item.get("video_versions") or []
+                imgs = item.get("image_versions2", {}).get("candidates") or []
+
+                if vids:
+                    v_url = vids[0]["url"]
+                    resp = session.get(v_url, timeout=30)
+                    if resp.status_code == 200 and len(resp.content) > 5000:
+                        v_file = work_dir / f"slide_{idx+1}.mp4"
+                        v_file.write_bytes(resp.content)
+                        clean_v = work_dir / f"slide_{idx+1}_clean.mp4"
+                        if _strip_and_protect_video(v_file, clean_v) and clean_v.exists() and clean_v.stat().st_size > 1000:
+                            downloaded_videos.append(clean_v)
+                            media_items.append({"type": "video", "path": clean_v})
+                        else:
+                            downloaded_videos.append(v_file)
+                            media_items.append({"type": "video", "path": v_file})
+                elif imgs:
+                    img_url = imgs[0]["url"]
+                    resp = session.get(img_url, timeout=20)
+                    if resp.status_code == 200 and len(resp.content) > 1000:
+                        img_file = work_dir / f"slide_{idx+1}.jpg"
+                        img_file.write_bytes(resp.content)
+                        downloaded_images.append(img_file)
+                        media_items.append({"type": "photo", "path": img_file})
+
+            if downloaded_images or downloaded_videos:
+                result["image_paths"] = downloaded_images
+                result["media_items"] = media_items
+                result["is_video"] = (len(downloaded_videos) > 0 and len(downloaded_images) == 0)
+                if len(downloaded_videos) == 1 and len(downloaded_images) == 0:
+                    result["video_path"] = downloaded_videos[0]
+                result["success"] = True
+                logger.info(
+                    "Polaris carousel download succeeded: %s (%d images, %d videos)",
+                    shortcode, len(downloaded_images), len(downloaded_videos),
+                )
+                return True
+        else:
+            # ── Single Item (Photo or Video) ──
+            vids = prod.get("video_versions") or []
+            imgs = prod.get("image_versions2", {}).get("candidates") or []
+
+            if vids:
+                v_url = vids[0]["url"]
+                resp = session.get(v_url, timeout=35)
+                if resp.status_code == 200 and len(resp.content) > 5000:
+                    raw_video = work_dir / "raw_media.mp4"
+                    raw_video.write_bytes(resp.content)
+
+                    clean_video = work_dir / "clean_media.mp4"
+                    stripped = _strip_and_protect_video(raw_video, clean_video)
+                    final_path = clean_video if (stripped and clean_video.exists() and clean_video.stat().st_size > 1000) else raw_video
+
+                    result["video_path"] = final_path
+                    result["is_video"] = True
+                    result["success"] = True
+                    logger.info("Polaris video download succeeded: %s (%.1f MB)", shortcode, final_path.stat().st_size / (1024 * 1024))
+                    return True
+            elif imgs:
+                img_url = imgs[0]["url"]
+                resp = session.get(img_url, timeout=20)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    img_file = work_dir / "media.jpg"
+                    img_file.write_bytes(resp.content)
+                    result["image_paths"] = [img_file]
+                    result["media_items"] = [{"type": "photo", "path": img_file}]
+                    result["is_video"] = False
+                    result["success"] = True
+                    logger.info("Polaris single photo download succeeded: %s", shortcode)
+                    return True
+
+    except Exception as exc:
+        logger.debug("Polaris extraction error for %s: %s", shortcode, exc)
+
+    return False
+
+
 def download_instagram(url: str) -> dict:
     """
     Download an Instagram reel/post/video with multi-tier architecture:
-    1. Primary Tier: Direct public Meta CDN embed stream extractor (Instant, zero cookies).
-    2. Fallback Tier A: Anonymous yt-dlp cookie-free public extraction.
-    3. Fallback Tier B: Authenticated yt-dlp extraction (if cookies exist, for login-walled reels).
-    4. Anti-Detection: Unique device profile injection & perceptual protection.
-    5. Safe: Never requires accounts for public reels, never triggers maintenance mode!
+    1. Primary Tier: Direct Polaris GraphQL stream & carousel extractor (Instant, zero cookies).
+    2. Secondary Tier: Direct public Meta CDN embed stream extractor.
+    3. Fallback Tier A: Anonymous yt-dlp cookie-free public extraction.
+    4. Fallback Tier B: Authenticated yt-dlp extraction (if cookies exist, for login-walled reels).
+    5. Anti-Detection: Unique device profile injection & perceptual protection.
+    6. Safe: Never requires accounts for public reels, posts, or carousels!
     """
     session_id = uuid.uuid4().hex[:8]
     work_dir = DOWNLOAD_DIR / session_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
     result = {
-        "success":    False,
-        "video_path": None,
+        "success":     False,
+        "video_path":  None,
         "image_paths": None,
-        "caption":    "",
-        "author":     "",
-        "error":      None,   # friendly message for user
-        "error_type": None,   # 'private' | 'not_found' | 'generic'
-        "raw_error":  None,   # full error string for admin log
+        "media_items": [],
+        "caption":     "",
+        "author":      "",
+        "error":       None,   # friendly message for user
+        "error_type":  None,   # 'private' | 'not_found' | 'generic'
+        "raw_error":   None,   # full error string for admin log
     }
 
-    # ── Tier 1: Direct Cookie-Free Embed Extractor (Fastest, High-Speed CDN) ──
+    shortcode = extract_shortcode(url)
+
+    # ── Tier 1: Direct Cookie-Free Polaris GraphQL Engine (Photos, Carousels, Reels) ──
+    if shortcode:
+        try:
+            if download_instagram_polaris(shortcode, work_dir, result):
+                return result
+        except Exception as exc:
+            logger.debug("Polaris tier exception: %s", exc)
+
+    # ── Tier 2: Direct Cookie-Free Embed Extractor (High-Speed Meta CDN) ──
     try:
         if download_via_direct_embed(url, work_dir, result):
             return result
@@ -835,8 +1012,8 @@ def extract_shortcode(url: str) -> str | None:
     if ig_match:
         return ig_match.group(1)
 
-    # 2. TikTok standard video URL (@user/video/<id> or /v/<id>)
-    tt_id_match = re.search(r"tiktok\.com/(?:@[^/?#\s]+/video/|v/)(\d+)", url)
+    # 2. TikTok standard video/photo URL (@user/video/<id>, @user/photo/<id>, or /v/<id>)
+    tt_id_match = re.search(r"tiktok\.com/(?:@[^/?#\s]+/(?:video|photo)/|v/)(\d+)", url)
     if tt_id_match:
         return f"tt_{tt_id_match.group(1)}"
 
@@ -946,9 +1123,14 @@ def download_tiktok(url: str) -> dict:
             images = d.get("images")
             if images and isinstance(images, list) and len(images) > 0:
                 downloaded_images = []
+                img_headers = {
+                    "User-Agent": headers["User-Agent"],
+                    "Referer": "https://www.tiktok.com/",
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                }
                 for idx, img_url in enumerate(images[:10]):
                     try:
-                        img_resp = cffi_requests.get(img_url, headers=headers, impersonate="chrome124", timeout=20)
+                        img_resp = cffi_requests.get(img_url, headers=img_headers, impersonate="chrome124", timeout=20)
                         if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                             img_file = work_dir / f"slide_{idx + 1}.jpg"
                             img_file.write_bytes(img_resp.content)
@@ -958,8 +1140,22 @@ def download_tiktok(url: str) -> dict:
 
                 if downloaded_images:
                     result["image_paths"] = downloaded_images
+                    result["media_items"] = [{"type": "photo", "path": p} for p in downloaded_images]
                     result["is_video"] = False
                     result["success"] = True
+
+                    # Extract and download background music track if available
+                    music_url = d.get("music") or (d.get("music_info") or {}).get("play")
+                    if music_url:
+                        try:
+                            m_resp = cffi_requests.get(music_url, headers=img_headers, impersonate="chrome124", timeout=20)
+                            if m_resp.status_code == 200 and len(m_resp.content) > 2000:
+                                audio_file = work_dir / "audio.mp3"
+                                audio_file.write_bytes(m_resp.content)
+                                result["audio_path"] = audio_file
+                        except Exception as m_exc:
+                            logger.debug("Failed downloading TikTok background audio: %s", m_exc)
+
                     logger.info("TikTok photo slides downloaded successfully: %d images", len(downloaded_images))
                     return result
 

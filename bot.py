@@ -33,6 +33,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     InputMediaPhoto,
+    InputMediaVideo,
 )
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import TelegramError, BadRequest
@@ -1471,13 +1472,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             video_path   = result.get("video_path")
             image_paths  = result.get("image_paths", [])
+            media_items  = result.get("media_items", [])
+            audio_path   = result.get("audio_path")
             caption_text = result.get("caption", "")
             author_text  = result.get("author", "")
             music_text   = result.get("music", "")
             sc           = result.get("shortcode") or extract_shortcode(text) or ""
 
             try:
-                # ── Case A: Video / Reel ──────────────────────────────────
+                # ── Case A: Single Video / Reel ───────────────────────────
                 if result.get("is_video", True) and video_path:
                     bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
                     cap_lines = [
@@ -1490,12 +1493,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         cap_lines.append(f"🎵 <b>Sound:</b> <code>{html.escape(music_text)}</code>")
                     if caption_text and caption_text.strip():
                         clean_cap = caption_text.strip()
-                        if len(clean_cap) > 700:
-                            clean_cap = clean_cap[:700] + "…"
+                        if len(clean_cap) > 600:
+                            clean_cap = clean_cap[:600] + "…"
                         cap_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
                     cap_lines.append("━━━━━━━━━━━━━━━━━━━━")
                     cap_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
                     video_caption = "\n".join(cap_lines)
+                    if len(video_caption) > 1000:
+                        video_caption = video_caption[:990] + "…"
 
                     v_kb = kb_video_actions(sc) if sc else None
 
@@ -1508,8 +1513,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         reply_markup=v_kb,
                     )
 
-                # ── Case B: Single Photo or Carousel / Slideshow ──────────
-                elif image_paths:
+                # ── Case B: Single Photo or Multi-Slide Carousel / Slideshow ──
+                elif image_paths or media_items:
                     bot_user = (context.bot.username or "InstaLoaderBot").lstrip("@")
                     media_lines = [
                         f"{E_CONFETTI} <b>Done!</b> Metadata stripped {E_BLACK_MASK}",
@@ -1521,15 +1526,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         media_lines.append(f"🎵 <b>Sound:</b> <code>{html.escape(music_text)}</code>")
                     if caption_text and caption_text.strip():
                         clean_cap = caption_text.strip()
-                        if len(clean_cap) > 700:
-                            clean_cap = clean_cap[:700] + "…"
+                        if len(clean_cap) > 600:
+                            clean_cap = clean_cap[:600] + "…"
                         media_lines.append(f"📝 <b>Caption:</b>\n<code>{html.escape(clean_cap)}</code>")
                     media_lines.append("━━━━━━━━━━━━━━━━━━━━")
                     media_lines.append(f"{E_ROCKET} <b>Downloaded via @{bot_user}</b>")
                     media_caption = "\n".join(media_lines)
+                    if len(media_caption) > 1000:
+                        media_caption = media_caption[:990] + "…"
 
-                    if len(image_paths) == 1:
-                        with open(image_paths[0], "rb") as pf:
+                    all_items = media_items if media_items else [{"type": "photo", "path": p} for p in image_paths]
+                    if len(all_items) == 1 and all_items[0].get("type") == "photo":
+                        with open(all_items[0]["path"], "rb") as pf:
                             await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_PHOTO)
                             await context.bot.send_photo(
                                 chat_id=message.chat_id,
@@ -1541,23 +1549,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 connect_timeout=30,
                             )
                     else:
-                        await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_PHOTO)
-                        media_group = []
-                        opened_files = []
+                        # Chunk into groups of 10 (Telegram max per media group)
+                        for chunk_idx, chunk_start in enumerate(range(0, len(all_items), 10)):
+                            chunk = all_items[chunk_start:chunk_start + 10]
+                            await context.bot.send_chat_action(message.chat_id, ChatAction.UPLOAD_PHOTO)
+                            media_group = []
+                            opened_files = []
+                            try:
+                                for idx, item in enumerate(chunk):
+                                    f = open(item["path"], "rb")
+                                    opened_files.append(f)
+                                    cap = media_caption if (chunk_idx == 0 and idx == 0) else None
+                                    pm = ParseMode.HTML if (chunk_idx == 0 and idx == 0) else None
+                                    if item.get("type") == "video":
+                                        media_group.append(InputMediaVideo(media=f, caption=cap, parse_mode=pm))
+                                    else:
+                                        media_group.append(InputMediaPhoto(media=f, caption=cap, parse_mode=pm))
+                                await context.bot.send_media_group(chat_id=message.chat_id, media=media_group)
+                            finally:
+                                for f in opened_files:
+                                    try:
+                                        f.close()
+                                    except Exception:
+                                        pass
+
+                    # If background audio exists (e.g. TikTok slideshow or audio track)
+                    if audio_path and Path(audio_path).exists():
                         try:
-                            for idx, img_p in enumerate(image_paths[:10]):  # Telegram max 10 per album
-                                f = open(img_p, "rb")
-                                opened_files.append(f)
-                                cap = media_caption if idx == 0 else None
-                                pm = ParseMode.HTML if idx == 0 else None
-                                media_group.append(InputMediaPhoto(media=f, caption=cap, parse_mode=pm))
-                            await context.bot.send_media_group(chat_id=message.chat_id, media=media_group)
-                        finally:
-                            for f in opened_files:
-                                try:
-                                    f.close()
-                                except Exception:
-                                    pass
+                            with open(audio_path, "rb") as af:
+                                await context.bot.send_audio(
+                                    chat_id=message.chat_id,
+                                    audio=af,
+                                    title=music_text or "Soundtrack",
+                                    performer=author_text or "Audio",
+                                )
+                        except Exception as a_exc:
+                            logger.debug("Non-fatal error sending carousel audio: %s", a_exc)
 
                 try:
                     log_download(user.id, text, True)
